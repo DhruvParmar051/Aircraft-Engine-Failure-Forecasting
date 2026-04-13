@@ -263,8 +263,8 @@ Day 14: Everything assembled
 | Task ID | Task Name                                                                     | Contributor | Completed |
 | ------- | ----------------------------------------------------------------------------- | ----------- | --------- |
 | T01     | Data loading & combining all 4 datasets (train.csv, test.csv)                 | Dhruv       | [x]       |
-| T02     | RUL computation & capping for training data                                   | Dhruv       | [ ]       |
-| T03     | Feature engineering (drop constant sensors, normalize, rolling features)      | Dhruv       | [ ]       |
+| T02     | RUL computation & capping for training data                                   | Dhruv       | [x]       |
+| T03     | Feature engineering (drop constant sensors, normalize, rolling features)      | Dhruv       | [x]       |
 | T04     | EDA — sensor distributions, lifecycle plots, correlation matrix               | Umme        | [ ]       |
 | T05     | EDA — identify useful vs useless sensors, operating condition clusters        | Umme        | [ ]       |
 | T06     | Sequence windowing utility (sliding window W=30)                              | Shrey       | [ ]       |
