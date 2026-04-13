@@ -255,3 +255,42 @@ Day 14: Everything assembled
 6. **Evaluation**: always report RMSE and NASA score on test set
 
 7. **Notebook naming**: `model_name.ipynb` (e.g., `lstm.ipynb`, `quantile_gru.ipynb`)
+
+---
+
+## Task Tracker
+
+| Task ID | Task Name                                                                     | Contributor | Completed |
+| ------- | ----------------------------------------------------------------------------- | ----------- | --------- |
+| T01     | Data loading & combining all 4 datasets (train.csv, test.csv)                 | Dhruv       | [x]       |
+| T02     | RUL computation & capping for training data                                   | Dhruv       | [ ]       |
+| T03     | Feature engineering (drop constant sensors, normalize, rolling features)      | Dhruv       | [ ]       |
+| T04     | EDA — sensor distributions, lifecycle plots, correlation matrix               | Umme        | [ ]       |
+| T05     | EDA — identify useful vs useless sensors, operating condition clusters        | Umme        | [ ]       |
+| T06     | Sequence windowing utility (sliding window W=30)                              | Shrey       | [ ]       |
+| T07     | Evaluation module (RMSE + NASA scoring function)                              | Aditya      | [ ]       |
+| T08     | AR model implementation                                                       | Dhruv       | [ ]       |
+| T09     | ARMA model implementation                                                     | Dhruv       | [ ]       |
+| T10     | ARIMA model implementation                                                    | Dhruv       | [ ]       |
+| T11     | MLP model implementation                                                      | Aditya      | [ ]       |
+| T12     | RNN model implementation                                                      | Aditya      | [ ]       |
+| T13     | Quantile MLP implementation                                                   | Aditya      | [ ]       |
+| T14     | Quantile RNN implementation                                                   | Aditya      | [ ]       |
+| T15     | LSTM model implementation                                                     | Shrey       | [ ]       |
+| T16     | GRU model implementation                                                      | Shrey       | [ ]       |
+| T17     | Quantile LSTM implementation                                                  | Shrey       | [ ]       |
+| T18     | Quantile GRU implementation                                                   | Shrey       | [ ]       |
+| T19     | TCN model implementation                                                      | Umme        | [ ]       |
+| T20     | Quantile TCN implementation                                                   | Umme        | [ ]       |
+| T21     | TFT (Temporal Fusion Transformer) implementation                              | Dhruv       | [ ]       |
+| T22     | Model comparison table (RMSE + NASA scores for all models)                    | Dhruv       | [ ]       |
+| T23     | Comparison visualizations (bar charts, line plots, box plots)                 | Shrey       | [ ]       |
+| T24     | Quantile model analysis (prediction intervals, coverage, calibration)         | Shrey       | [ ]       |
+| T25     | Error analysis (per-model residuals, short vs long RUL, operating conditions) | Aditya      | [ ]       |
+| T26     | Per-model prediction vs actual plots                                          | Aditya      | [ ]       |
+| T27     | TFT interpretability analysis (attention weights)                             | Dhruv       | [ ]       |
+| T28     | Survival/degradation analysis                                                 | Umme        | [ ]       |
+| T29     | Final report — intro, dataset, methodology sections                           | Umme        | [ ]       |
+| T30     | Final report — results, conclusions, future work                              | Umme        | [ ]       |
+| T31     | Final report — review, integration, formatting                                | Dhruv       | [ ]       |
+| T32     | Final packaging (code + report + data) & submission                           | Dhruv       | [ ]       |
