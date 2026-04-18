@@ -15,7 +15,7 @@ import pandas as pd
 
 def rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """root mean squared error — symmetric, scale-dependent"""
-    return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+    return float(np.sqrt(np.mean(np.square(y_true - y_pred))))
 
 
 def nasa_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -24,7 +24,15 @@ def nasa_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     d = predicted - actual (positive = late prediction = more dangerous)
     """
     d = y_pred - y_true
-    scores = np.where(d < 0, np.exp(-d / 13.0) - 1, np.exp(d / 10.0) - 1)
+
+    # clip to prevent exponential explosion
+    d = np.clip(d, -100, 100)
+
+    scores = np.where(
+        d < 0,
+        np.exp(-d / 13.0) - 1,
+        np.exp(d / 10.0) - 1
+    )
     return float(np.sum(scores))
 
 
@@ -44,13 +52,25 @@ def evaluate(
     if y_true.shape != y_pred.shape:
         raise ValueError(f"Shape mismatch: y_true={y_true.shape}, y_pred={y_pred.shape}")
 
+    if not np.isfinite(y_true).all() or not np.isfinite(y_pred).all():
+        raise ValueError("NaN or infinite values detected")
+
+    y_pred = np.clip(y_pred, 0, 125)
+
+    ns = nasa_score(y_true, y_pred)
+
     results = {
-        "rmse":       rmse(y_true, y_pred),
-        "nasa_score": nasa_score(y_true, y_pred),
+        "rmse": rmse(y_true, y_pred),
+        "nasa_score": ns,
+        "nasa_score_mean": ns / len(y_true),
     }
 
     if verbose:
-        print(f"  [{model_name}] RMSE: {results['rmse']:.4f}  |  NASA Score: {results['nasa_score']:.2f}")
+        print(
+            f"  [{model_name}] RMSE: {results['rmse']:.4f}  |  "
+            f"NASA Score: {results['nasa_score']:.2f}  "
+            f"(mean: {results['nasa_score_mean']:.2f})"
+        )
 
     return results
 
@@ -67,7 +87,14 @@ def evaluate_per_subset(
     returns DataFrame: dataset_id | rmse | nasa_score
     """
     rows = []
-    for did in sorted(np.unique(dataset_ids)):
+    
+    valid_ids = {1, 2, 3, 4}
+    if not set(np.unique(dataset_ids)).issubset(valid_ids):
+        raise ValueError("dataset_ids must be in {1,2,3,4}")
+
+    unique_ids = sorted(np.unique(dataset_ids))
+
+    for did in unique_ids:
         mask = dataset_ids == did
         r = evaluate(y_true[mask], y_pred[mask], model_name=f"{model_name}_FD00{did}", verbose=True)
         r["dataset_id"] = int(did)
@@ -77,8 +104,7 @@ def evaluate_per_subset(
     overall["dataset_id"] = "ALL"
     rows.append(overall)
 
-    return pd.DataFrame(rows)[["dataset_id", "rmse", "nasa_score"]]
-
+    return pd.DataFrame(rows)[["dataset_id", "rmse", "nasa_score", "nasa_score_mean"]]
 
 def summarise_all_models(results: dict[str, dict[str, float]]) -> pd.DataFrame:
     """
