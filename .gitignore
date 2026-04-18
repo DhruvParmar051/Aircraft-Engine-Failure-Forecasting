@@ -114,4 +114,6 @@ env/
 # =========================
 *.cache
 .cache/
-data/processed/
+
+data
+
