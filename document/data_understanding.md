@@ -15,7 +15,7 @@ Dhruv is building an Applied Forecasting / Predictive Maintenance project for IT
 |------|-----------|------|---------|
 
 | `train_FD001.txt` | Full run-to-failure trajectories | 20,631 | 100 |
-
+   
 | `train_FD002.txt` | Full run-to-failure trajectories | 53,759 | 260 |
 
 | `train_FD003.txt` | Full run-to-failure trajectories | 24,720 | 100 |
