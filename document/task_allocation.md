@@ -269,9 +269,9 @@ Day 14: Everything assembled
 | T05     | EDA — identify useful vs useless sensors, operating condition clusters        | Umme        | [ ]       |
 | T06     | Sequence windowing utility (sliding window W=30)                              | Shrey       | [ ]       |
 | T07     | Evaluation module (RMSE + NASA scoring function)                              | Aditya      | [ ]       |
-| T08     | AR model implementation                                                       | Dhruv       | [ ]       |
-| T09     | ARMA model implementation                                                     | Dhruv       | [ ]       |
-| T10     | ARIMA model implementation                                                    | Dhruv       | [ ]       |
+| T08     | AR model implementation                                                       | Dhruv       | [x]       |
+| T09     | ARMA model implementation                                                     | Dhruv       | [x]       |
+| T10     | ARIMA model implementation                                                    | Dhruv       | [x]       |
 | T11     | MLP model implementation                                                      | Aditya      | [ ]       |
 | T12     | RNN model implementation                                                      | Aditya      | [ ]       |
 | T13     | Quantile MLP implementation                                                   | Aditya      | [ ]       |
