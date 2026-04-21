@@ -115,6 +115,7 @@ env/
 # =========================
 *.cache
 .cache/
+.pkl
 
 data
 artifacts

@@ -16,7 +16,7 @@ from pathlib import Path
 # 26-column schema: 2 ids + 3 op settings + 21 sensors
 COLS = ["engine_id", "cycle", "op1", "op2", "op3"] + [f"s{i}" for i in range(1, 22)]
 
-SUBSET_IDS = [1, 2, 3, 4]
+SUBSET_IDS = [4]
 
 
 def load_single_train(path: Path, dataset_id: int, engine_id_offset: int) -> pd.DataFrame:
