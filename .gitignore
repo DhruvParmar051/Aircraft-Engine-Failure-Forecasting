@@ -119,4 +119,4 @@ env/
 data
 artifacts
 results
-
+lightning_logs
