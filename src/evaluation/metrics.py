@@ -11,7 +11,7 @@ NASA score — asymmetric; late predictions penalised more heavily than early on
 
 import numpy as np
 import pandas as pd
-
+from sklearn.metrics import r2_score
 
 def rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """root mean squared error — symmetric, scale-dependent"""
@@ -58,19 +58,23 @@ def evaluate(
     y_pred = np.clip(y_pred, 0, 125)
 
     ns = nasa_score(y_true, y_pred)
-
+    r2 = r2_score(y_true, y_pred)
     results = {
         "rmse": rmse(y_true, y_pred),
         "nasa_score": ns,
         "nasa_score_mean": ns / len(y_true),
+        "r2_score": r2
     }
 
+    
     if verbose:
         print(
             f"  [{model_name}] RMSE: {results['rmse']:.4f}  |  "
             f"NASA Score: {results['nasa_score']:.2f}  "
-            f"(mean: {results['nasa_score_mean']:.2f})"
+            f"(mean: {results['nasa_score_mean']:.2f})  |  "
+            f"R2: {results['r2_score']:.4f}"
         )
+   
 
     return results
 
@@ -104,7 +108,7 @@ def evaluate_per_subset(
     overall["dataset_id"] = "ALL"
     rows.append(overall)
 
-    return pd.DataFrame(rows)[["dataset_id", "rmse", "nasa_score", "nasa_score_mean"]]
+    return pd.DataFrame(rows)[["dataset_id", "rmse", "nasa_score", "nasa_score_mean", 'r2_score']]
 
 def summarise_all_models(results: dict[str, dict[str, float]]) -> pd.DataFrame:
     """

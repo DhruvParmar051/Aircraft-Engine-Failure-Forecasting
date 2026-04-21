@@ -51,7 +51,7 @@ RUL_CAP         = 125   # piecewise-linear RUL cap used at training time
 MAX_HORIZON     = 150   # max forecast steps when searching for threshold crossing
 SMOOTH_WINDOW   = 5     # rolling-median applied to health_index before any model fit
 END_OF_LIFE_RUL = 5     # training rows with RUL <= this define the "failure region"
-
+EOL_HEALTH = None
 # Default orders — used ONLY as fallback if optimize_* is not called.
 # These are NOT justified by ACF/PACF; always run optimize_* before production use.
 DEFAULT_AR_P    = 3     # CH05: book fits AR(3) on foot-traffic data as example
@@ -444,7 +444,7 @@ def rolling_forecast_engine(
         # get_prediction with end=i+window-1 gives in-sample + out-of-sample
         # we only want the last `window` values (the out-of-sample part)
         predictions = res.get_prediction(start=0, end=i + window - 1)
-        oos = predictions.predicted_mean.values[-window:]
+        oos = np.asarray(predictions.predicted_mean)[-window:]
         pred.extend(oos.tolist())
 
     # Trim to exact validation length (total_len - train_len)
@@ -504,25 +504,39 @@ def _linear_extrapolation_rul(
 
 
 def _estimate_rul_from_forecast(
-    preds: np.ndarray,
+    preds:    np.ndarray,
     observed: np.ndarray,
-    threshold: float,
+    threshold: float = None,   # kept for signature compat, no longer used
 ) -> float:
     """
-    RUL = index of first forecast step that crosses the failure threshold.
-    Falls back to linear extrapolation if no crossing found within MAX_HORIZON.
+    Estimate RUL from the forecast trajectory using slope extrapolation.
+    
+    No threshold needed. Logic:
+        1. Fit a linear trend to the forecast.
+        2. slope = rate of health_index increase per cycle.
+        3. max_health = 95th percentile of health_index at end-of-life in train.
+           (pass this in as a module-level constant, set once from training data)
+        4. RUL = (max_health - current_health) / slope
+    
+    This works for ALL engines regardless of where they are in their lifecycle.
     """
-    preds = np.asarray(preds, dtype=float)
+    preds    = np.asarray(preds, dtype=float)
+    current  = float(observed[-1])
 
     if preds.size == 0 or not np.all(np.isfinite(preds)):
-        return _linear_extrapolation_rul(observed, threshold)
+        return float(RUL_CAP)
 
-    # If already above threshold at first forecast step → RUL = 0
-    crossings = np.where(preds >= threshold)[0]
-    if crossings.size > 0:
-        return float(crossings[0])
+    # Fit linear trend to forecast to get slope
+    x     = np.arange(len(preds), dtype=float)
+    slope, intercept = np.polyfit(x, preds, 1)
 
-    return _linear_extrapolation_rul(observed, threshold)
+    if slope <= 1e-4:
+        # Forecast is flat — engine is stable, far from failure
+        return float(RUL_CAP)
+
+    # How many steps until forecast reaches EOL_HEALTH?
+    steps = (EOL_HEALTH - current) / slope
+    return float(np.clip(steps, 0.0, RUL_CAP))
 
 
 # ─────────────────────────────────────────────
