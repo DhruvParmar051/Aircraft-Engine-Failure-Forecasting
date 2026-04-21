@@ -66,6 +66,18 @@ DEFAULT_ARIMA_Q = 2
 # 1. HEALTH INDEX (PCA on rolling-mean sensors)
 # ─────────────────────────────────────────────
 
+def _combine_components(pca, X, signs, n_comp):
+    pc = pca.transform(X)
+    result = []
+
+    for i in range(n_comp):
+        c = pc[:, i]
+        c = c * signs[i]   # apply precomputed sign
+        result.append(c)
+
+    return result[0] if n_comp == 1 else np.maximum(result[0], result[1])
+
+
 def build_pca_health_index(
     train: pd.DataFrame,
     test: pd.DataFrame,
@@ -73,41 +85,106 @@ def build_pca_health_index(
     rolling_window: int = 10,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Convert sensor readings into a scalar health_index via PCA (PC1).
+    Convert sensor readings into a scalar health_index via PCA.
 
-    Uses rolling-mean columns (e.g. s2_rmean_10) if present — smoother signal,
-    which is required before fitting any time-series model.
-
-    PC1 sign is flipped so that health_index INCREASES as the engine degrades.
-    This makes the threshold-crossing interpretation intuitive: when the forecast
-    exceeds the threshold, the engine has reached end-of-life.
+    Strategy:
+    1. Check if op_cluster explains >30% of PC1 variance.
+       If yes → per-cluster PCA (FD002/FD004 with 6 conditions).
+       If no  → global PCA (FD001/FD003 with 1 condition).
+    2. Use 2 PCA components and take element-wise max.
+       Handles dual fault modes (FD003/FD004) where PC1 and PC2
+       capture different degradation paths.
+    3. Sign-flip each component so higher = more degraded.
     """
-    # ── choose feature columns ──────────────────────────────────────────────
+    from sklearn.metrics import r2_score as _r2
+    from sklearn.preprocessing import LabelEncoder
+
     rmean_cols = [f"{c}_rmean_{rolling_window}" for c in sensor_cols]
     use_cols   = rmean_cols if all(c in train.columns for c in rmean_cols) else sensor_cols
 
-    # ── fit PCA on train only — never fit on test (would be data leakage) ──
-    pca  = PCA(n_components=1)
-    X_tr = train[use_cols].values
-    pca.fit(X_tr)
-
-    pc1_train = pca.transform(X_tr).ravel()
-    pc1_test  = pca.transform(test[use_cols].values).ravel()
-
-    # ── sign flip: PC1 should correlate with degradation (higher = worse) ──
-    # Strategy: compute Pearson correlation between PC1 and decreasing RUL on train.
-    # If correlation is negative, flip sign.
-    if np.corrcoef(pc1_train, -train["RUL"].values)[0, 1] < 0:
-        pc1_train = -pc1_train
-        pc1_test  = -pc1_test
-
     train = train.copy()
     test  = test.copy()
-    train["health_index"] = pc1_train
-    test["health_index"]  = pc1_test
+
+    # ───────── decision maps ─────────
+    use_per_cluster_map = {}
+    use_2components_map = {}
+
+    for did, grp in train.groupby("dataset_id"):
+        X_grp = grp[use_cols].values
+
+        pc1 = PCA(n_components=1).fit_transform(X_grp).ravel()
+        op_enc = LabelEncoder().fit_transform(grp["op_cluster"].values)
+
+        r2_val = _r2(op_enc, pc1)
+
+        use_per_cluster_map[did] = r2_val > 0.3
+        use_2components_map[did] = did in (3, 4) # only FD003
+
+        print(f"FD00{did}: R2={r2_val:.3f} | per_cluster={use_per_cluster_map[did]} | 2comp={use_2components_map[did]}")
+
+    # ───────── initialize ─────────
+    train["health_index"] = np.nan
+    test["health_index"]  = np.nan
+
+    # ───────── main loop ─────────
+    for did, tr_grp in train.groupby("dataset_id"):
+        te_grp = test[test["dataset_id"] == did]
+
+        n_comp = 2 if use_2components_map[did] else 1
+
+        if use_per_cluster_map[did]:
+            # per-cluster PCA
+            for cluster_id in tr_grp["op_cluster"].unique():
+                tr_c = tr_grp[tr_grp["op_cluster"] == cluster_id]
+                te_c = te_grp[te_grp["op_cluster"] == cluster_id]
+
+                if len(tr_c) < 4:
+                    continue
+
+                pca = PCA(n_components=n_comp).fit(tr_c[use_cols].values)
+
+                pc_tr = pca.transform(tr_grp[use_cols].values)
+                signs = []
+                for i in range(n_comp):
+                    c = pc_tr[:, i]
+                    sign = 1.0 if np.corrcoef(c, -tr_grp["RUL"].values)[0, 1] >= 0 else -1.0
+                    signs.append(sign)          
+
+                hi_tr = _combine_components(pca, tr_grp[use_cols].values, signs, n_comp)
+                hi_te = _combine_components(pca, te_grp[use_cols].values, signs, n_comp)
+                train.loc[tr_grp.index, "health_index"] = hi_tr
+                test.loc[te_grp.index, "health_index"]  = hi_te
+
+
+        else:
+            # global PCA
+            pca = PCA(n_components=n_comp).fit(tr_grp[use_cols].values)
+
+            pc_tr = pca.transform(tr_grp[use_cols].values)
+            signs = []
+            for i in range(n_comp):
+                c = pc_tr[:, i]
+                sign = 1.0 if np.corrcoef(c, -tr_grp["RUL"].values)[0, 1] >= 0 else -1.0
+                signs.append(sign)        
+
+            hi_tr = _combine_components(pca, tr_grp[use_cols].values, signs, n_comp)
+            hi_te = _combine_components(pca, te_grp[use_cols].values, signs, n_comp)
+            train.loc[tr_grp.index, "health_index"] = hi_tr
+            test.loc[te_grp.index, "health_index"]  = hi_te
+
+    for did in train["dataset_id"].unique():
+        tr_mask = train["dataset_id"] == did
+        te_mask = test["dataset_id"] == did
+        mu = train.loc[tr_mask, "health_index"].mean()
+        sd = train.loc[tr_mask, "health_index"].std()
+        if sd < 1e-6:
+            continue
+        train.loc[tr_mask, "health_index"] = (train.loc[tr_mask, "health_index"] - mu) / sd
+        test.loc[te_mask,  "health_index"] = (test.loc[te_mask,  "health_index"] - mu) / sd
+
 
     return train, test
-
+   
 
 # ─────────────────────────────────────────────
 # 2. FAILURE THRESHOLD
@@ -520,22 +597,13 @@ def _estimate_rul_from_forecast(
     
     This works for ALL engines regardless of where they are in their lifecycle.
     """
-    preds    = np.asarray(preds, dtype=float)
-    current  = float(observed[-1])
-
+    preds = np.asarray(preds, dtype=float)
     if preds.size == 0 or not np.all(np.isfinite(preds)):
-        return float(RUL_CAP)
-
-    # Fit linear trend to forecast to get slope
-    x     = np.arange(len(preds), dtype=float)
-    slope, intercept = np.polyfit(x, preds, 1)
-
-    if slope <= 1e-4:
-        # Forecast is flat — engine is stable, far from failure
-        return float(RUL_CAP)
-
-    # How many steps until forecast reaches EOL_HEALTH?
-    steps = (EOL_HEALTH - current) / slope
+        return _linear_extrapolation_rul(observed, threshold)
+    crossings = np.where(preds >= threshold)[0]
+    if crossings.size > 0:
+        return float(crossings[0])
+    return _linear_extrapolation_rul(observed, threshold)
     return float(np.clip(steps, 0.0, RUL_CAP))
 
 
