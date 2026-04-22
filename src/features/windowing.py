@@ -7,14 +7,14 @@ design decisions:
 - windows never cross engine boundaries
 - create_windows: training — engines shorter than window_size are skipped with a warning
 - create_last_window_per_engine: evaluation — short engines are zero-padded (never skipped)
-- split_by_engine: stratified by dataset_id so FD001–FD004 are proportionally represented
+- split_by_engine: random engine-level split (no dataset_id stratification — single dataset)
 - output shape: X=(n_samples, window_size, n_features), y=(n_samples,)
 """
 
 import numpy as np
 import pandas as pd
 
-DEFAULT_WINDOW = 30  # cycles; matches shared convention in task_allocation.md
+DEFAULT_WINDOW = 30
 
 
 def create_windows(
@@ -24,31 +24,23 @@ def create_windows(
     group_col: str = "engine_id",
     target_col: str = "RUL",
     step: int = 1,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    create sliding window sequences from a time-series DataFrame, grouped by engine
-    windows never cross engine boundaries
+    Create sliding window sequences grouped by engine.
+    Windows never cross engine boundaries.
 
-    returns:
-        X           : (n_samples, window_size, n_features) float32
-        y           : (n_samples,) float32 — RUL at last cycle of each window
-        engine_ids  : (n_samples,) int64   — source engine for train/val splitting
-        dataset_ids : (n_samples,) int64   — source FD subset for per-subset evaluation
-
-    IMPROVEMENT: now also returns dataset_ids so evaluate_per_subset can be called
-    directly on windowed outputs without needing a separate lookup
+    Returns:
+        X          : (n_samples, window_size, n_features) float32
+        y          : (n_samples,) float32 — RUL at last cycle of each window
+        engine_ids : (n_samples,) int64   — source engine for train/val splitting
     """
-    if "dataset_id" not in df.columns:
-        raise ValueError("DataFrame must contain 'dataset_id' column")
-
     df = df.sort_values([group_col, "cycle"]).reset_index(drop=True)
 
-    X_list, y_list, id_list, did_list = [], [], [], []
+    X_list, y_list, id_list = [], [], []
     skipped = []
 
     for engine_id, group in df.groupby(group_col, sort=False):
         n = len(group)
-        dataset_id = int(group["dataset_id"].iloc[0])
 
         if n < window_size:
             skipped.append((engine_id, n))
@@ -59,10 +51,9 @@ def create_windows(
 
         for end in range(window_size - 1, n, step):
             start = end - window_size + 1
-            X_list.append(features[start : end + 1])
+            X_list.append(features[start: end + 1])
             y_list.append(targets[end])
             id_list.append(engine_id)
-            did_list.append(dataset_id)
 
     if skipped:
         print(f"  [WARN] {len(skipped)} engines skipped (shorter than window={window_size}): "
@@ -74,14 +65,13 @@ def create_windows(
             "Reduce window_size or check your data."
         )
 
-    X           = np.stack(X_list, axis=0)
-    y           = np.array(y_list,   dtype=np.float32)
-    engine_ids  = np.array(id_list,  dtype=np.int64)
-    dataset_ids = np.array(did_list, dtype=np.int64)
+    X          = np.stack(X_list, axis=0)
+    y          = np.array(y_list,  dtype=np.float32)
+    engine_ids = np.array(id_list, dtype=np.int64)
 
     print(f"  windows: X={X.shape}, y={y.shape} "
           f"({df[group_col].nunique()} engines, {len(skipped)} skipped)")
-    return X, y, engine_ids, dataset_ids
+    return X, y, engine_ids
 
 
 def create_last_window_per_engine(
@@ -90,26 +80,20 @@ def create_last_window_per_engine(
     window_size: int = DEFAULT_WINDOW,
     group_col: str = "engine_id",
     target_col: str = "RUL",
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    extract only the LAST window per engine — used at evaluation time
-    test engines shorter than window_size are zero-padded (never skipped —
-    every test engine must be evaluated)
+    Extract only the LAST window per engine — used at evaluation time.
+    Engines shorter than window_size are zero-padded (never skipped).
 
-    BUG FIX: target now uses cycle-based idxmax instead of positional iloc[-1]
-    returns X, y, engine_ids, dataset_ids (one row per engine)
+    Returns X, y, engine_ids — one row per engine.
     """
-    if "dataset_id" not in df.columns:
-        raise ValueError("DataFrame must contain 'dataset_id' column")
-
     df = df.sort_values([group_col, "cycle"]).reset_index(drop=True)
 
-    X_list, y_list, id_list, did_list = [], [], [], []
+    X_list, y_list, id_list = [], [], []
     padded_engines = []
 
     for engine_id, group in df.groupby(group_col, sort=False):
         n = len(group)
-        dataset_id = int(group["dataset_id"].iloc[0])
 
         if n < window_size:
             padded_engines.append((engine_id, n))
@@ -121,64 +105,51 @@ def create_last_window_per_engine(
         else:
             X_list.append(group[feature_cols].values[-window_size:].astype(np.float32))
 
-        # use cycle-based last row — not positional (safe here since sorted, but explicit)
+        # cycle-based last row — not positional
         last_idx = group["cycle"].idxmax()
         y_list.append(float(group.loc[last_idx, target_col]))
         id_list.append(engine_id)
-        did_list.append(dataset_id)
 
     if padded_engines:
         print(f"  [WARN] {len(padded_engines)} engines zero-padded (shorter than window={window_size}): "
               f"{[e for e, _ in padded_engines[:5]]}")
 
-    X           = np.stack(X_list, axis=0)
-    y           = np.array(y_list,   dtype=np.float32)
-    engine_ids  = np.array(id_list,  dtype=np.int64)
-    dataset_ids = np.array(did_list, dtype=np.int64)
+    X          = np.stack(X_list, axis=0)
+    y          = np.array(y_list,  dtype=np.float32)
+    engine_ids = np.array(id_list, dtype=np.int64)
 
     print(f"  last-window eval: X={X.shape}, y={y.shape}")
-    return X, y, engine_ids, dataset_ids
+    return X, y, engine_ids
 
 
 def split_by_engine(
     X: np.ndarray,
     y: np.ndarray,
     engine_ids: np.ndarray,
-    dataset_ids: np.ndarray,
     val_fraction: float = 0.2,
     random_seed: int = 42,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    train/validation split stratified by dataset_id
-    splits within each FD subset proportionally — prevents random shuffle from
-    accidentally under-representing FD001 (100 engines) vs FD004 (248 engines)
+    Random engine-level train/validation split.
+    Splits on engine_ids so windows from the same engine never span both splits.
 
-    BUG FIX: was a single shuffle across all engines — no stratification despite docstring claim
-    now splits per dataset_id and combines, so each subset contributes proportionally to val
-
-    returns X_train, X_val, y_train, y_val
+    Returns X_train, X_val, y_train, y_val.
     """
-    rng = np.random.default_rng(random_seed)
-    val_mask = np.zeros(len(engine_ids), dtype=bool)
+    rng            = np.random.default_rng(random_seed)
+    unique_engines = np.unique(engine_ids)
+    rng.shuffle(unique_engines)
 
-    for did in np.unique(dataset_ids):
-        subset_mask    = dataset_ids == did
-        subset_engines = np.unique(engine_ids[subset_mask])
-        rng.shuffle(subset_engines)
+    n_val          = max(1, int(len(unique_engines) * val_fraction))
+    val_engines    = set(unique_engines[:n_val])
 
-        n_val = max(1, int(len(subset_engines) * val_fraction))
-        val_engines_subset = set(subset_engines[:n_val])
-
-        # mark rows from val engines in this subset
-        val_mask |= (subset_mask & np.isin(engine_ids, list(val_engines_subset)))
-
+    val_mask   = np.isin(engine_ids, list(val_engines))
     train_mask = ~val_mask
 
-    n_train_engines = len(np.unique(engine_ids[train_mask]))
-    n_val_engines   = len(np.unique(engine_ids[val_mask]))
-    print(f"  stratified train/val split: "
-          f"{train_mask.sum()} train samples ({n_train_engines} engines) | "
-          f"{val_mask.sum()} val samples ({n_val_engines} engines)")
+    n_train = len(np.unique(engine_ids[train_mask]))
+    n_val   = len(np.unique(engine_ids[val_mask]))
+    print(f"  train/val split: "
+          f"{train_mask.sum()} train samples ({n_train} engines) | "
+          f"{val_mask.sum()} val samples ({n_val} engines)")
 
     return X[train_mask], X[val_mask], y[train_mask], y[val_mask]
 
@@ -190,27 +161,20 @@ def get_arima_splits(
     group_col: str = "engine_id",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    train/validation split on the raw DataFrame for classical models (ARIMA, AR, ARMA)
-    splits by engine_id stratified per dataset_id — same logic as split_by_engine
-    returns (train_df, val_df) as DataFrames — NOT windowed arrays
-
-    IMPROVEMENT: classical models need raw time-series DataFrames not numpy windows
-    without this utility, ARIMA authors would write inline splits that may differ
-    from the sequence-model split and produce incomparable validation sets
+    Train/validation split on the raw DataFrame for classical models (AR, ARMA, ARIMA).
+    Splits by engine_id — returns (train_df, val_df) as DataFrames, not windowed arrays.
     """
-    rng = np.random.default_rng(random_seed)
-    val_engines: set[int] = set()
+    rng     = np.random.default_rng(random_seed)
+    engines = np.array(sorted(df[group_col].unique()))
+    rng.shuffle(engines)
 
-    for did, group_df in df.groupby("dataset_id"):
-        engines = np.array(sorted(group_df[group_col].unique()))
-        rng.shuffle(engines)
-        n_val = max(1, int(len(engines) * val_fraction))
-        val_engines.update(engines[:n_val].tolist())
+    n_val       = max(1, int(len(engines) * val_fraction))
+    val_engines = set(engines[:n_val].tolist())
 
-    val_mask   = df[group_col].isin(val_engines)
-    train_df   = df[~val_mask].copy()
-    val_df     = df[val_mask].copy()
+    val_mask = df[group_col].isin(val_engines)
+    train_df = df[~val_mask].copy()
+    val_df   = df[val_mask].copy()
 
-    print(f"  ARIMA train/val: {train_df[group_col].nunique()} train engines, "
-          f"{val_df[group_col].nunique()} val engines (stratified per dataset)")
+    print(f"  train/val: {train_df[group_col].nunique()} train engines, "
+          f"{val_df[group_col].nunique()} val engines")
     return train_df, val_df
