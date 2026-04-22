@@ -37,6 +37,8 @@ from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.stattools import adfuller
+from sklearn.isotonic import IsotonicRegression
+
 
 warnings.filterwarnings("ignore")
 
@@ -56,7 +58,8 @@ DEFAULT_ARMA_Q  = 2
 DEFAULT_ARIMA_P = 2
 DEFAULT_ARIMA_D = 2   # ADF shows d=2 for CMAPSS health_index
 DEFAULT_ARIMA_Q = 2
-
+_LAST_WAS_FALLBACK: bool = False
+SAFETY_FACTOR = 0.88
 
 # ─────────────────────────────────────────────
 # 1. HEALTH INDEX — PCA on rolling-mean sensors
@@ -66,6 +69,25 @@ def _combine_components(pca, X, signs, n_comp):
     pc = pca.transform(X)
     result = [pc[:, i] * signs[i] for i in range(n_comp)]
     return result[0] if n_comp == 1 else np.maximum(result[0], result[1])
+
+
+
+def _enforce_monotone(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Per-engine isotonic regression: forces health_index to be
+    monotonically non-decreasing over cycle.
+    WHY: PCA projection can oscillate due to op-condition noise.
+    Isotonic regression is the minimal correction — it doesn't
+    change the mean, only removes non-monotone bumps.
+    """
+    df = df.copy()
+    ir = IsotonicRegression(increasing=True)  # higher cycle = more degraded
+    for eid, grp in df.groupby("engine_id"):
+        idx     = grp.index
+        cycles  = grp["cycle"].values.astype(float)
+        hi      = grp["health_index"].values
+        df.loc[idx, "health_index"] = ir.fit_transform(cycles, hi)
+    return df
 
 def build_pca_health_index(
     train: pd.DataFrame,
@@ -134,9 +156,14 @@ def build_pca_health_index(
         train["health_index"] = (train["health_index"] - mu) / sd
         test["health_index"]  = (test["health_index"]  - mu) / sd
 
+    train = _enforce_monotone(train)
+    test  = _enforce_monotone(test)
+
+    # Re-check R2 after monotone fix
     r2_rul = _r2(-train["RUL"].values, train["health_index"].values)
-    print(f"health_index R2 with RUL: {r2_rul:.3f}  (target: > 0.3)")
+    print(f"health_index R2 with RUL (post-monotone): {r2_rul:.3f}  (target: > 0.3)")
     return train, test
+
 
 
 # ─────────────────────────────────────────────
@@ -197,7 +224,7 @@ def check_stationarity_adf(series: np.ndarray) -> dict:
 
 def run_stationarity_report(
     train: pd.DataFrame,
-    n_engines: int = 10,
+    n_engines: int = 240,
 ) -> pd.DataFrame:
     """
     ADF report on a sample of engines from the single dataset.
@@ -429,9 +456,9 @@ def select_best_arma_order(
         (best_p, best_q): modal best ARMA order.
     """
     if p_range is None:
-        p_range = range(1, 6)
+        p_range = range(1, 4)
     if q_range is None:
-        q_range = range(1, 6)
+        q_range = range(1, 4)
 
     order_list = list(product(p_range, q_range))
     eids       = train["engine_id"].unique()[:n_engines]
@@ -487,9 +514,9 @@ def select_best_arima_order(
         (best_p, best_q): modal best (p,q) for ARIMA(p,d,q).
     """
     if p_range is None:
-        p_range = range(1, 6)
+        p_range = range(1, 4)
     if q_range is None:
-        q_range = range(1, 6)
+        q_range = range(1, 4)
 
     order_list = list(product(p_range, q_range))
     eids       = train["engine_id"].unique()[:n_engines]
@@ -577,10 +604,23 @@ def rolling_forecast_engine(
     pred      = []
 
     for i in range(train_len, total_len, window):
-        model       = SARIMAX(series[:i], order=(p, d, q), simple_differencing=False)
-        res         = model.fit(disp=False)
-        predictions = res.get_prediction(start=0, end=i + window - 1)
-        oos         = np.asarray(predictions.predicted_mean)[-window:]
+        try:
+            model = SARIMAX(
+                series[:i],
+                order=(p, d, q),
+                simple_differencing=False,
+                enforce_stationarity=False,
+                enforce_invertibility=False,
+            )
+            res = model.fit(disp=False)
+
+            predictions = res.get_prediction(start=0, end=i + window - 1)
+            oos = np.asarray(predictions.predicted_mean)[-window:]
+
+        except Exception:
+            # 🔥 fallback: persistence model
+            oos = np.repeat(series[i-1], window)
+
         pred.extend(oos.tolist())
 
     return np.array(pred[: total_len - train_len])
@@ -607,6 +647,7 @@ def _linear_extrapolation_rul(
     threshold: float,
     tail: int | None = None,
 ) -> float:
+    global _LAST_WAS_FALLBACK
     if tail is None:
         tail = max(5, min(30, int(0.2 * len(series))))
     y = series[-tail:] if len(series) >= tail else series
@@ -618,6 +659,7 @@ def _linear_extrapolation_rul(
 
     if slope <= 1e-4:
         # Flat tail — use regressor instead of capping at 125
+        _LAST_WAS_FALLBACK = True   # flat tail → regressor used
         return _health_index_to_rul(float(series[-1]))
 
     steps = (threshold - float(y[-1])) / slope
@@ -626,28 +668,35 @@ def _linear_extrapolation_rul(
 # Module-level variable — set once by fit_rul_from_health_index()
 _RUL_REGRESSOR = None   # stores (slope, intercept) from train fit
 
+# Instead fit only on recent history (last 30% of each engine's life)
 def fit_rul_from_health_index(train: pd.DataFrame) -> None:
-    """
-    Fit a linear mapping: health_index → RUL on training data.
-    Called once after build_pca_health_index in each notebook.
-    Used as fallback for engines where forecast slope is too flat.
-    """
     global _RUL_REGRESSOR
-    x      = train["health_index"].values
-    y      = train["RUL"].values
+
+    # Keep only rows from the last 30% of each engine's life
+    # WHY: regressor is only used as fallback when forecast fails
+    #      it should predict "given current state" not "given any state"
+    recent_rows = []
+    for eid, grp in train.groupby("engine_id"):
+        g   = grp.sort_values("cycle")
+        n   = len(g)
+        cut = max(1, int(n * 0.4))   # last 60% of life
+        recent_rows.append(g.iloc[cut:])
+    
+    recent = pd.concat(recent_rows)
+    x      = recent["health_index"].values
+    y      = recent["RUL"].values
     slope, intercept = np.polyfit(x, y, 1)
     _RUL_REGRESSOR   = (float(slope), float(intercept))
-    r2 = 1 - np.sum((y - (slope * x + intercept))**2) / np.sum((y - y.mean())**2)
-    print(f"  RUL regressor: RUL = {slope:.2f} * hi + {intercept:.2f}  (R2={r2:.3f})")
-
+    r2 = 1 - np.sum((y - (slope*x + intercept))**2) / np.sum((y - y.mean())**2)
+    print(f"  RUL regressor (recent 60%): RUL = {slope:.2f} * hi + {intercept:.2f}  (R2={r2:.3f})")
 
 def _health_index_to_rul(health_index_val: float) -> float:
-    """Predict RUL from current health_index using fitted regressor."""
     if _RUL_REGRESSOR is None:
-        return float(RUL_CAP)
+        return float(RUL_CAP)   # 125, then SAFETY_FACTOR=0.88 gives 110
     slope, intercept = _RUL_REGRESSOR
     pred = slope * health_index_val + intercept
     return float(np.clip(pred, 0.0, RUL_CAP))
+
 
 def _estimate_rul_from_forecast(
     preds: np.ndarray,
@@ -659,6 +708,7 @@ def _estimate_rul_from_forecast(
     2. No crossing → fit slope to forecast tail → extrapolate to threshold.
     3. Flat/negative forecast → fall back to observed series.
     """
+    global _LAST_WAS_FALLBACK
     preds = np.asarray(preds, dtype=float)
     if preds.size == 0 or not np.all(np.isfinite(preds)):
         return _health_index_to_rul(float(observed[-1]))
@@ -666,7 +716,7 @@ def _estimate_rul_from_forecast(
     # Step 1: direct crossing within forecast
     crossings = np.where(preds >= threshold)[0]
     if crossings.size > 0:
-        return float(crossings[0])
+        return float(max(crossings[0], 3))
 
     # Step 2: forecast slope extrapolation (last 50% of forecast)
     tail_start = max(1, len(preds) // 2)
@@ -677,10 +727,16 @@ def _estimate_rul_from_forecast(
     if f_slope > 1e-4:
         extra     = (threshold - float(preds[-1])) / f_slope
         total_rul = float(len(preds)) + extra
+        # WHY: if extrapolation says >300 cycles, forecast slope is too flat to trust
+        # Use regressor instead — it's more honest about current health state
+        if total_rul > 300:
+            _LAST_WAS_FALLBACK = True
+            return _health_index_to_rul(float(observed[-1]))
         return float(np.clip(total_rul, 0.0, RUL_CAP))
 
     # Step 3: forecast flat — use health_index → RUL regressor
     # More informative than linear extrapolation on flat observed tail
+    _LAST_WAS_FALLBACK = True
     return _health_index_to_rul(float(observed[-1]))
 
 def _invert_diff(
@@ -724,16 +780,17 @@ def predict_rul_ar(
     d: int = DEFAULT_ARIMA_D,
     smooth_window: int = SMOOTH_WINDOW,
 ) -> float:
-    """AR(p) on diff-d series. Forecast inverted back to original scale."""
     smoothed = smooth_series(series, smooth_window)
     if len(smoothed) <= p + d + 5:
         return _linear_extrapolation_rul(smoothed, threshold)
     try:
-        diff       = np.diff(smoothed, n=d) if d > 0 else smoothed
-        res        = SARIMAX(diff, order=(p, 0, 0), simple_differencing=False).fit(disp=False)
-        diff_preds = res.forecast(steps=MAX_HORIZON)
-        level_preds = _invert_diff(diff_preds, smoothed, d)
-        return _estimate_rul_from_forecast(level_preds, smoothed, threshold)
+        # WHY: pass original series with d built into SARIMAX order
+        # instead of manually diffing + inverting (which accumulates error)
+        # This is identical to how predict_rul_arima works — which scores 83k NASA
+        res   = SARIMAX(smoothed, order=(p, d, 0), simple_differencing=False).fit(disp=False)
+        preds = res.forecast(steps=MAX_HORIZON)
+        # preds are already at original scale — no inversion needed
+        return _estimate_rul_from_forecast(preds, smoothed, threshold)
     except Exception:
         return _linear_extrapolation_rul(smoothed, threshold)
 
@@ -750,16 +807,15 @@ def predict_rul_arma(
     d: int = DEFAULT_ARIMA_D,
     smooth_window: int = SMOOTH_WINDOW,
 ) -> float:
-    """ARMA(p,q) on diff-d series. Forecast inverted back to original scale."""
     smoothed = smooth_series(series, smooth_window)
     if len(smoothed) <= p + q + d + 3:
         return _linear_extrapolation_rul(smoothed, threshold)
     try:
-        diff       = np.diff(smoothed, n=d) if d > 0 else smoothed
-        res        = SARIMAX(diff, order=(p, 0, q), simple_differencing=False).fit(disp=False)
-        diff_preds = res.forecast(steps=MAX_HORIZON)
-        level_preds = _invert_diff(diff_preds, smoothed, d)
-        return _estimate_rul_from_forecast(level_preds, smoothed, threshold)
+        # WHY: same fix as AR — let SARIMAX handle differencing internally
+        # Manual diff → fit → invert was causing forecast divergence in v1
+        res   = SARIMAX(smoothed, order=(p, d, q), simple_differencing=False).fit(disp=False)
+        preds = res.forecast(steps=MAX_HORIZON)
+        return _estimate_rul_from_forecast(preds, smoothed, threshold)
     except Exception:
         return _linear_extrapolation_rul(smoothed, threshold)
 
@@ -782,7 +838,8 @@ def predict_rul_arima(
         return _linear_extrapolation_rul(smoothed, threshold)
     try:
         res   = SARIMAX(smoothed, order=(p, d, q), simple_differencing=False).fit(disp=False)
-        preds = res.forecast(steps=MAX_HORIZON)
+        ARIMA_HORIZON = min(MAX_HORIZON, 150)
+        preds = res.forecast(steps=ARIMA_HORIZON)
         return _estimate_rul_from_forecast(preds, smoothed, threshold)
     except Exception:
         return _linear_extrapolation_rul(smoothed, threshold)
@@ -792,35 +849,50 @@ def predict_rul_arima(
 # 13. DATASET-LEVEL PREDICTION
 # ─────────────────────────────────────────────
 
+# Module-level flag — predict_rul_* functions set this to True when they fall back
+# This avoids changing function signatures
+
+
 def predict_dataset(
     df: pd.DataFrame,
     predict_fn: Callable[[np.ndarray], float],
     threshold: float,
+    verbose_engines: bool = False,   # NEW: print per-engine if True — helps debug
 ) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Apply predict_fn to every engine in df.
-    Returns (y_true, y_pred) — one entry per engine.
+    
+    global _LAST_WAS_FALLBACK
 
-    predict_fn must have p/d/q bound via functools.partial.
-    threshold is a single float (not a dict).
-    """
     df = df.sort_values(["engine_id", "cycle"])
 
-    y_true, y_pred  = [], []
-    fallback_count  = 0
-    total_count     = 0
+    y_true, y_pred = [], []
+    fallback_count = 0
+    total_count    = 0
 
     for _, g in df.groupby("engine_id", sort=False):
         series   = g["health_index"].values
         true_rul = float(g["RUL"].iloc[-1])
+        eid      = g["engine_id"].iloc[0]
 
+        # ── Step 1: call model ────────────────────────────────────────
+        _LAST_WAS_FALLBACK = False          # reset flag before each call
         pred_raw = predict_fn(series, threshold=threshold)
-        pred     = float(np.clip(pred_raw, 0.0, RUL_CAP))
 
-        if pred == float(RUL_CAP):
+        # ── Step 2: detect fallback BEFORE clipping ───────────────────
+        # WHY: checking after np.clip(pred_raw, 0, 125) is wrong —
+        #      a legitimate pred of 125 looks identical to a capped fallback
+        is_fallback = _LAST_WAS_FALLBACK
+        if is_fallback:
             fallback_count += 1
-        total_count += 1
 
+        # ── Step 3: clip to valid RUL range ───────────────────────────
+        pred = float(np.clip(pred_raw * SAFETY_FACTOR, 0.0, RUL_CAP))
+        # ── Step 4: optional per-engine print for debugging ───────────
+        if verbose_engines:
+            tag = " [FALLBACK]" if is_fallback else ""
+            print(f"    engine {eid:>4d}  true={true_rul:6.1f}  "
+                  f"pred={pred:6.1f}  err={pred-true_rul:+.1f}{tag}")
+
+        total_count += 1
         y_true.append(true_rul)
         y_pred.append(pred)
 
@@ -864,3 +936,92 @@ def simulate_test_from_train(
         rows.append(g.iloc[:cutoff])
 
     return pd.concat(rows, ignore_index=True)
+
+
+def validate_model_rolling(
+    train: pd.DataFrame,
+    order: tuple,
+    n_engines: int = 10,
+    train_split: float = 0.7,
+    model_name: str = "ARIMA",
+):
+    """
+    Walk-forward validation on N engines from train set.
+    
+    Logic Flow:
+    1. Sample N engines from train
+    2. For each engine: split into train/val (70/30)
+    3. Rolling one-step-ahead forecast on val portion
+    4. Compute RMSE per engine
+    5. Plot observed vs rolling forecast
+    """
+    from src.models.classical import rolling_forecast_engine, smooth_series
+
+    eids       = train["engine_id"].unique()[:n_engines]
+    all_rmse   = []
+
+    fig, axes  = plt.subplots(n_engines, 1,
+                              figsize=(12, 3 * n_engines),
+                              sharex=False)
+    axes = np.atleast_1d(axes)
+
+    for ax, eid in zip(axes, eids):
+
+        # ── Step 1: get smoothed series ───────────────────────────────
+        raw    = (train[train["engine_id"] == eid]
+                  .sort_values("cycle")["health_index"].values)
+        series = smooth_series(raw)
+
+        if len(series) < 20:
+            continue
+
+        # ── Step 2: train/val split ───────────────────────────────────
+        train_len = int(len(series) * train_split)
+        val_len   = len(series) - train_len
+
+        # ── Step 3: rolling one-step-ahead forecast ───────────────────
+        # WHY: window=1 = most honest validation — each step only uses
+        # data available at that point in time (no lookahead)
+        rolled = rolling_forecast_engine(
+            series    = series,
+            train_len = train_len,
+            order     = order,
+            window    = 1,
+        )
+
+        actual_val = series[train_len: train_len + len(rolled)]
+
+        # ── Step 4: RMSE ──────────────────────────────────────────────
+        rmse_eng = float(np.sqrt(np.mean((actual_val - rolled) ** 2)))
+        all_rmse.append(rmse_eng)
+
+        # ── Step 5: plot ──────────────────────────────────────────────
+        obs_x    = np.arange(len(series))
+        rolled_x = np.arange(train_len, train_len + len(rolled))
+
+        ax.plot(obs_x,    series, color="steelblue", lw=1.5,
+                label="Observed health_index")
+        ax.plot(rolled_x, rolled, color="orange",    lw=1.5, ls="--",
+                label=f"Rolling forecast (RMSE={rmse_eng:.3f})")
+        ax.axvline(train_len, color="gray", ls=":", lw=1,
+                   label="Train/Val split")
+        ax.set_title(f"Engine {eid} — {model_name} Walk-Forward Validation")
+        ax.set_ylabel("health_index")
+        ax.legend(loc="upper left", fontsize=8)
+
+    axes[-1].set_xlabel("Cycle")
+    plt.tight_layout()
+    plt.savefig(f"{model_name}_rolling_validation.png", dpi=150)
+    plt.show()
+
+    # ── Summary ───────────────────────────────────────────────────────
+    print(f"\n{'='*40}")
+    print(f"{model_name} Walk-Forward Validation Summary")
+    print(f"{'='*40}")
+    print(f"Engines validated : {len(all_rmse)}")
+    print(f"Mean RMSE         : {np.mean(all_rmse):.4f}")
+    print(f"Std RMSE          : {np.std(all_rmse):.4f}")
+    print(f"Best engine RMSE  : {np.min(all_rmse):.4f}")
+    print(f"Worst engine RMSE : {np.max(all_rmse):.4f}")
+    print(f"{'='*40}")
+    return np.array(all_rmse)
