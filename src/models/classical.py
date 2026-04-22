@@ -15,13 +15,10 @@ Book rules enforced here:
     5. rolling_forecast for walk-forward validation (CH05/CH06/CH07).
     6. ADF run at level + first difference (+ second if needed) to determine d.
 
-Multi-engine order selection (NEW):
-    select_best_ar_order   → samples N engines per dataset → modal best p
-    select_best_arma_order → samples N engines per dataset → modal best (p,q)
-    select_best_arima_order→ samples N engines per dataset → modal best (p,q) with fixed d
-
-    Notebooks call ONE function instead of looping engines manually.
-    The representative engine for Ljung-Box diagnostics is the longest engine.
+Single-dataset design:
+    - One train DataFrame, one test DataFrame, multiple engines each.
+    - No dataset_id column anywhere — single threshold (float) not a dict.
+    - select_best_* samples N engines from the single dataset.
 """
 
 from __future__ import annotations
@@ -49,51 +46,46 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────────
 
 RUL_CAP         = 125
-MAX_HORIZON     = 150
+MAX_HORIZON     = 400
 SMOOTH_WINDOW   = 5
 END_OF_LIFE_RUL = 5
-EOL_HEALTH      = None
 
 DEFAULT_AR_P    = 3
 DEFAULT_ARMA_P  = 2
 DEFAULT_ARMA_Q  = 2
 DEFAULT_ARIMA_P = 2
-DEFAULT_ARIMA_D = 2   # updated: ADF shows d=2 for CMAPSS health_index
+DEFAULT_ARIMA_D = 2   # ADF shows d=2 for CMAPSS health_index
 DEFAULT_ARIMA_Q = 2
 
 
 # ─────────────────────────────────────────────
-# 1. HEALTH INDEX (PCA on rolling-mean sensors)
+# 1. HEALTH INDEX — PCA on rolling-mean sensors
 # ─────────────────────────────────────────────
 
 def _combine_components(pca, X, signs, n_comp):
     pc = pca.transform(X)
-    result = []
-    for i in range(n_comp):
-        c = pc[:, i] * signs[i]
-        result.append(c)
+    result = [pc[:, i] * signs[i] for i in range(n_comp)]
     return result[0] if n_comp == 1 else np.maximum(result[0], result[1])
-
 
 def build_pca_health_index(
     train: pd.DataFrame,
     test: pd.DataFrame,
     sensor_cols: list[str],
     rolling_window: int = 10,
+    n_components: int = 1,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Convert sensor readings into a scalar health_index via PCA.
+    PCA health_index with operating condition removal.
 
-    Strategy:
-    1. Check if op_cluster explains >30% of PC1 variance.
-       If yes → per-cluster PCA (FD002/FD004).
-       If no  → global PCA (FD001/FD003).
-    2. Use 2 PCA components and take element-wise max for FD003/FD004.
-    3. Sign-flip each component so higher = more degraded.
-    4. Standardize per dataset_id using train statistics.
+    Key insight for multi-condition datasets (FD002/FD004):
+    Per-cluster PCA produces incompatible scales across clusters.
+    Correct approach:
+        1. Subtract per-cluster mean from each sensor (removes op condition effect)
+        2. Run global PCA on residuals (captures degradation, not op switching)
+        3. Sign-flip so higher = more degraded
+        4. Standardize using train stats
     """
     from sklearn.metrics import r2_score as _r2
-    from sklearn.preprocessing import LabelEncoder
 
     rmean_cols = [f"{c}_rmean_{rolling_window}" for c in sensor_cols]
     use_cols   = rmean_cols if all(c in train.columns for c in rmean_cols) else sensor_cols
@@ -101,66 +93,49 @@ def build_pca_health_index(
     train = train.copy()
     test  = test.copy()
 
-    use_per_cluster_map = {}
-    use_2components_map = {}
+    # ── Step 1: remove per-cluster mean (op condition detrending) ────────
+    # Fit cluster means on train only — no leakage
+    cluster_means = (
+        train.groupby("op_cluster")[use_cols].mean()
+    )  # shape: (n_clusters, n_sensors)
 
-    for did, grp in train.groupby("dataset_id"):
-        X_grp  = grp[use_cols].values
-        pc1    = PCA(n_components=1).fit_transform(X_grp).ravel()
-        op_enc = LabelEncoder().fit_transform(grp["op_cluster"].values)
-        r2_val = _r2(op_enc, pc1)
-        use_per_cluster_map[did] = r2_val > 0.3
-        use_2components_map[did] = did in (3, 4)
-        print(f"FD00{did}: R2={r2_val:.3f} | per_cluster={use_per_cluster_map[did]} | 2comp={use_2components_map[did]}")
+    def subtract_cluster_mean(df, means):
+        df = df.copy()
+        for cluster_id, row in means.iterrows():
+            mask = df["op_cluster"] == cluster_id
+            df.loc[mask, use_cols] = df.loc[mask, use_cols].values - row.values
+        return df
 
-    train["health_index"] = np.nan
-    test["health_index"]  = np.nan
+    train_detrended = subtract_cluster_mean(train, cluster_means)
+    test_detrended  = subtract_cluster_mean(test,  cluster_means)
 
-    for did, tr_grp in train.groupby("dataset_id"):
-        te_grp = test[test["dataset_id"] == did]
-        n_comp = 2 if use_2components_map[did] else 1
+    # ── Step 2: global PCA on detrended sensors ───────────────────────────
+    pca   = PCA(n_components=n_components).fit(train_detrended[use_cols].values)
+    pc_tr = pca.transform(train_detrended[use_cols].values)
 
-        if use_per_cluster_map[did]:
-            for cluster_id in tr_grp["op_cluster"].unique():
-                tr_c = tr_grp[tr_grp["op_cluster"] == cluster_id]
-                te_c = te_grp[te_grp["op_cluster"] == cluster_id]
-                if len(tr_c) < 4:
-                    continue
-                pca   = PCA(n_components=n_comp).fit(tr_c[use_cols].values)
-                pc_tr = pca.transform(tr_grp[use_cols].values)
-                signs = []
-                for i in range(n_comp):
-                    c    = pc_tr[:, i]
-                    sign = 1.0 if np.corrcoef(c, -tr_grp["RUL"].values)[0, 1] >= 0 else -1.0
-                    signs.append(sign)
-                hi_tr = _combine_components(pca, tr_grp[use_cols].values, signs, n_comp)
-                hi_te = _combine_components(pca, te_grp[use_cols].values, signs, n_comp)
-                train.loc[tr_grp.index, "health_index"] = hi_tr
-                test.loc[te_grp.index, "health_index"]  = hi_te
-        else:
-            pca   = PCA(n_components=n_comp).fit(tr_grp[use_cols].values)
-            pc_tr = pca.transform(tr_grp[use_cols].values)
-            signs = []
-            for i in range(n_comp):
-                c    = pc_tr[:, i]
-                sign = 1.0 if np.corrcoef(c, -tr_grp["RUL"].values)[0, 1] >= 0 else -1.0
-                signs.append(sign)
-            hi_tr = _combine_components(pca, tr_grp[use_cols].values, signs, n_comp)
-            hi_te = _combine_components(pca, te_grp[use_cols].values, signs, n_comp)
-            train.loc[tr_grp.index, "health_index"] = hi_tr
-            test.loc[te_grp.index, "health_index"]  = hi_te
+    # ── Step 3: sign-flip so higher = more degraded (corr with -RUL) ─────
+    signs = []
+    for i in range(n_components):
+        c    = pc_tr[:, i]
+        sign = 1.0 if np.corrcoef(c, -train["RUL"].values)[0, 1] >= 0 else -1.0
+        signs.append(sign)
 
-    # Standardize per dataset_id using train stats
-    for did in train["dataset_id"].unique():
-        tr_mask = train["dataset_id"] == did
-        te_mask = test["dataset_id"]  == did
-        mu = train.loc[tr_mask, "health_index"].mean()
-        sd = train.loc[tr_mask, "health_index"].std()
-        if sd < 1e-6:
-            continue
-        train.loc[tr_mask, "health_index"] = (train.loc[tr_mask, "health_index"] - mu) / sd
-        test.loc[te_mask,  "health_index"] = (test.loc[te_mask,  "health_index"] - mu) / sd
+    train["health_index"] = _combine_components(
+        pca, train_detrended[use_cols].values, signs, n_components
+    )
+    test["health_index"] = _combine_components(
+        pca, test_detrended[use_cols].values, signs, n_components
+    )
 
+    # ── Step 4: standardize using train stats ────────────────────────────
+    mu = train["health_index"].mean()
+    sd = train["health_index"].std()
+    if sd > 1e-6:
+        train["health_index"] = (train["health_index"] - mu) / sd
+        test["health_index"]  = (test["health_index"]  - mu) / sd
+
+    r2_rul = _r2(-train["RUL"].values, train["health_index"].values)
+    print(f"health_index R2 with RUL: {r2_rul:.3f}  (target: > 0.3)")
     return train, test
 
 
@@ -172,16 +147,13 @@ def compute_failure_threshold(
     train: pd.DataFrame,
     end_of_life_rul: int = END_OF_LIFE_RUL,
     quantile: float = 0.5,
-) -> dict[int, float]:
+) -> float:
     """
-    Per-dataset_id failure threshold from near-end-of-life training rows.
-    Returns {dataset_id: threshold_value}.
+    Single failure threshold from near-end-of-life training rows.
+    Returns a scalar float — not a dict.
     """
-    eol_rows   = train[train["RUL"] <= end_of_life_rul]
-    thresholds = {}
-    for did, group in eol_rows.groupby("dataset_id"):
-        thresholds[int(did)] = float(group["health_index"].quantile(quantile))
-    return thresholds
+    eol_rows = train[train["RUL"] <= end_of_life_rul]
+    return float(eol_rows["health_index"].quantile(quantile))
 
 
 # ─────────────────────────────────────────────
@@ -219,45 +191,50 @@ def check_stationarity_adf(series: np.ndarray) -> dict:
     diff2 = np.diff(diff1, n=1)
     p2    = adfuller(diff2)[1]
     result["diff2_pvalue"]  = round(p2, 4)
-    result["recommended_d"] = 2   # cap at 2 per book
+    result["recommended_d"] = 2
     return result
 
 
 def run_stationarity_report(
     train: pd.DataFrame,
-    n_engines_per_subset: int = 5,
+    n_engines: int = 10,
 ) -> pd.DataFrame:
     """
-    Stratified ADF report across all dataset_ids.
+    ADF report on a sample of engines from the single dataset.
     Prints per-engine p-values and the modal recommended_d.
+
+    Args:
+        n_engines: number of engines to sample (default 10).
     """
+    engine_sample = train["engine_id"].unique()[:n_engines]
     rows = []
-    for did, group in train.groupby("dataset_id"):
-        engine_sample = group["engine_id"].unique()[:n_engines_per_subset]
-        for eid in engine_sample:
-            s = (
-                group[group["engine_id"] == eid]
-                .sort_values("cycle")["health_index"]
-                .values
-            )
-            if len(s) < 10:
-                continue
-            adf = check_stationarity_adf(s)
-            rows.append({"dataset_id": did, "engine_id": eid, **adf})
+
+    for eid in engine_sample:
+        s = (
+            train[train["engine_id"] == eid]
+            .sort_values("cycle")["health_index"]
+            .values
+        )
+        if len(s) < 10:
+            continue
+        adf = check_stationarity_adf(s)
+        rows.append({"engine_id": eid, **adf})
 
     df = pd.DataFrame(rows)
+
     print("\nStationarity Report (ADF test per sampled engine):")
-    print(f"{'dataset_id':<12}{'engine_id':<12}{'level_p':<12}{'diff1_p':<12}{'rec_d'}")
-    print("-" * 55)
+    print(f"{'engine_id':<12}{'level_p':<12}{'diff1_p':<12}{'rec_d'}")
+    print("-" * 44)
     for _, r in df.iterrows():
         print(
-            f"{int(r.dataset_id):<12}{int(r.engine_id):<12}"
+            f"{int(r.engine_id):<12}"
             f"{r.level_pvalue:<12}{str(r.diff1_pvalue):<12}{r.recommended_d}"
         )
+
     d_counts = df["recommended_d"].value_counts().to_dict()
+    modal_d  = int(df["recommended_d"].mode()[0])
     print(f"\nd distribution: {d_counts}")
-    modal_d = int(df["recommended_d"].mode()[0])
-    print(f"→ recommended d = {modal_d}  (modal across all sampled engines)")
+    print(f"→ recommended d = {modal_d}  (modal across {len(df)} sampled engines)")
     return df
 
 
@@ -272,11 +249,7 @@ def plot_acf_pacf(
 ) -> None:
     """
     ACF + PACF side by side.
-
-    Reading guide:
-        PACF cuts off at lag p → AR(p) candidate
-        ACF  cuts off at lag q → MA(q) candidate
-        Both tail off          → ARMA(p,q) needed
+    PACF cuts off at p → AR(p). ACF cuts off at q → MA(q). Both tail off → ARMA.
     """
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
     plot_acf(series,  lags=lags, ax=axes[0])
@@ -290,40 +263,32 @@ def plot_acf_pacf(
 def plot_acf_pacf_multi(
     train: pd.DataFrame,
     d: int,
-    n_engines_per_dataset: int = 2,
+    n_engines: int = 3,
     lags: int = 20,
 ) -> None:
     """
-    ACF/PACF grid across multiple engines from all 4 datasets.
-
-    Notebooks call this ONE function instead of picking a single eid.
-    Series is differenced d times before plotting (per CH07 rule).
+    ACF/PACF grid for N sampled engines from the single dataset.
+    Series is differenced d times before plotting (CH07 rule).
 
     Args:
-        train:                 full training DataFrame with health_index column.
-        d:                     differencing order from run_stationarity_report.
-        n_engines_per_dataset: how many engines to sample per FD subset.
-        lags:                  number of lags for ACF/PACF.
+        train:     training DataFrame with health_index column.
+        d:         differencing order from run_stationarity_report.
+        n_engines: number of engines to plot.
+        lags:      number of lags for ACF/PACF.
     """
-    dataset_ids = sorted(train["dataset_id"].unique())
-    total       = len(dataset_ids) * n_engines_per_dataset
-    fig, axes   = plt.subplots(total, 2, figsize=(12, 4 * total))
-    axes        = np.atleast_2d(axes)
+    eids      = train["engine_id"].unique()[:n_engines]
+    fig, axes = plt.subplots(len(eids), 2, figsize=(12, 4 * len(eids)))
+    axes      = np.atleast_2d(axes)
 
-    row = 0
-    for did in dataset_ids:
-        eids = train[train["dataset_id"] == did]["engine_id"].unique()[:n_engines_per_dataset]
-        for eid in eids:
-            raw  = train[train["engine_id"] == eid].sort_values("cycle")["health_index"].values
-            smth = smooth_series(raw)
-            # Difference d times before plotting — shows what the model actually sees
-            series_plot = np.diff(smth, n=d) if d > 0 else smth
+    for row, eid in enumerate(eids):
+        raw         = train[train["engine_id"] == eid].sort_values("cycle")["health_index"].values
+        smth        = smooth_series(raw)
+        series_plot = np.diff(smth, n=d) if d > 0 else smth
 
-            plot_acf(series_plot,  lags=lags, ax=axes[row][0])
-            axes[row][0].set_title(f"ACF — FD00{did} engine {eid} (diff-{d})")
-            plot_pacf(series_plot, lags=lags, ax=axes[row][1])
-            axes[row][1].set_title(f"PACF — FD00{did} engine {eid} (diff-{d})")
-            row += 1
+        plot_acf(series_plot,  lags=lags, ax=axes[row][0])
+        axes[row][0].set_title(f"ACF — engine {eid} (diff-{d})")
+        plot_pacf(series_plot, lags=lags, ax=axes[row][1])
+        axes[row][1].set_title(f"PACF — engine {eid} (diff-{d})")
 
     plt.tight_layout()
     plt.show()
@@ -337,10 +302,7 @@ def optimize_AR(
     endog: Union[pd.Series, np.ndarray, list],
     p_values: list[int],
 ) -> pd.DataFrame:
-    """
-    Select AR(p) by AIC on a SINGLE already-stationary series.
-    Called internally by select_best_ar_order — no need to call directly.
-    """
+    """Select AR(p) by AIC on a single stationary series."""
     results = []
     for p in p_values:
         try:
@@ -348,21 +310,14 @@ def optimize_AR(
             results.append({"p": p, "AIC": round(model.aic, 2)})
         except Exception:
             continue
-    return (
-        pd.DataFrame(results)
-        .sort_values("AIC", ascending=True)
-        .reset_index(drop=True)
-    )
+    return pd.DataFrame(results).sort_values("AIC").reset_index(drop=True)
 
 
 def optimize_ARMA(
     endog: Union[pd.Series, np.ndarray, list],
     order_list: list[tuple[int, int]],
 ) -> pd.DataFrame:
-    """
-    Select ARMA(p,q) by AIC on a SINGLE already-stationary series.
-    Called internally by select_best_arma_order — no need to call directly.
-    """
+    """Select ARMA(p,q) by AIC on a single stationary series."""
     results = []
     for p, q in order_list:
         try:
@@ -370,11 +325,7 @@ def optimize_ARMA(
             results.append({"(p,q)": (p, q), "AIC": round(model.aic, 2)})
         except Exception:
             continue
-    return (
-        pd.DataFrame(results)
-        .sort_values("AIC", ascending=True)
-        .reset_index(drop=True)
-    )
+    return pd.DataFrame(results).sort_values("AIC").reset_index(drop=True)
 
 
 def optimize_ARIMA(
@@ -382,11 +333,7 @@ def optimize_ARIMA(
     order_list: list[tuple[int, int]],
     d: int,
 ) -> pd.DataFrame:
-    """
-    Select ARIMA(p,d,q) by AIC on the ORIGINAL (un-differenced) series.
-    SARIMAX handles differencing internally.
-    Called internally by select_best_arima_order — no need to call directly.
-    """
+    """Select ARIMA(p,d,q) by AIC on the original (un-differenced) series."""
     results = []
     for p, q in order_list:
         try:
@@ -394,20 +341,16 @@ def optimize_ARIMA(
             results.append({"(p,q)": (p, q), "d": d, "AIC": round(model.aic, 2)})
         except Exception:
             continue
-    return (
-        pd.DataFrame(results)
-        .sort_values("AIC", ascending=True)
-        .reset_index(drop=True)
-    )
+    return pd.DataFrame(results).sort_values("AIC").reset_index(drop=True)
 
 
 # ─────────────────────────────────────────────
-# 5b. MULTI-ENGINE ORDER SELECTION (NEW)
+# 5b. MULTI-ENGINE ORDER SELECTION
 # ─────────────────────────────────────────────
 
 def _get_representative_engine(train: pd.DataFrame) -> tuple[int, np.ndarray]:
     """
-    Return (eid, smoothed_series) for the longest engine across all datasets.
+    Return (eid, smoothed_series) for the longest engine.
     Used for Ljung-Box diagnostic fit in notebooks.
     """
     eid = train.groupby("engine_id")["cycle"].count().idxmax()
@@ -419,44 +362,41 @@ def select_best_ar_order(
     train: pd.DataFrame,
     d: int,
     p_values: list[int] | None = None,
-    n_engines_per_dataset: int = 3,
+    n_engines: int = 5,
 ) -> int:
     """
-    Sample N engines per FD dataset, run optimize_AR on each diff-d series,
-    return the modal best p across all engines.
-
-    Notebooks call this ONE function — no manual engine loop needed.
+    Sample N engines, run optimize_AR on each diff-d series,
+    return modal best p.
 
     Args:
-        train:                 full training DataFrame.
-        d:                     differencing order from run_stationarity_report.
-        p_values:              AR lag candidates. Defaults to [1..10].
-        n_engines_per_dataset: engines to sample per FD subset.
-
+        train:     training DataFrame.
+        d:         differencing order from run_stationarity_report.
+        p_values:  AR lag candidates. Defaults to [1..10].
+        n_engines: engines to sample.
     Returns:
-        best_p: modal best AR order (int).
+        best_p: modal best AR order.
     """
     if p_values is None:
         p_values = list(range(1, 11))
 
+    eids    = train["engine_id"].unique()[:n_engines]
     best_ps = []
-    for did in sorted(train["dataset_id"].unique()):
-        eids = train[train["dataset_id"] == did]["engine_id"].unique()[:n_engines_per_dataset]
-        for eid in eids:
-            raw  = train[train["engine_id"] == eid].sort_values("cycle")["health_index"].values
-            smth = smooth_series(raw)
-            diff = np.diff(smth, n=d) if d > 0 else smth
 
-            if len(diff) < max(p_values) + 5:
-                continue   # too short to fit reliably
+    for eid in eids:
+        raw  = train[train["engine_id"] == eid].sort_values("cycle")["health_index"].values
+        smth = smooth_series(raw)
+        diff = np.diff(smth, n=d) if d > 0 else smth
 
-            aic_df = optimize_AR(diff, p_values)
-            if aic_df.empty:
-                continue
+        if len(diff) < max(p_values) + 5:
+            continue
 
-            best_p = int(aic_df.iloc[0]["p"])
-            best_ps.append(best_p)
-            print(f"  FD00{did} engine {eid}: best p={best_p}  (AIC={aic_df.iloc[0]['AIC']})")
+        aic_df = optimize_AR(diff, p_values)
+        if aic_df.empty:
+            continue
+
+        best_p = int(aic_df.iloc[0]["p"])
+        best_ps.append(best_p)
+        print(f"  engine {eid}: best p={best_p}  (AIC={aic_df.iloc[0]['AIC']})")
 
     if not best_ps:
         print("  WARNING: no valid engines found, returning default p=3")
@@ -473,23 +413,20 @@ def select_best_arma_order(
     d: int,
     p_range: range | None = None,
     q_range: range | None = None,
-    n_engines_per_dataset: int = 3,
+    n_engines: int = 5,
 ) -> tuple[int, int]:
     """
-    Sample N engines per FD dataset, run optimize_ARMA on each diff-d series,
-    return the modal best (p,q) across all engines.
-
-    Notebooks call this ONE function — no manual engine loop needed.
+    Sample N engines, run optimize_ARMA on each diff-d series,
+    return modal best (p,q).
 
     Args:
-        train:                 full training DataFrame.
-        d:                     differencing order from run_stationarity_report.
-        p_range:               range of p values. Defaults to range(1,6).
-        q_range:               range of q values. Defaults to range(1,6).
-        n_engines_per_dataset: engines to sample per FD subset.
-
+        train:    training DataFrame.
+        d:        differencing order from run_stationarity_report.
+        p_range:  range of p values. Defaults to range(1,6).
+        q_range:  range of q values. Defaults to range(1,6).
+        n_engines: engines to sample.
     Returns:
-        (best_p, best_q): modal best ARMA order tuple.
+        (best_p, best_q): modal best ARMA order.
     """
     if p_range is None:
         p_range = range(1, 6)
@@ -497,31 +434,30 @@ def select_best_arma_order(
         q_range = range(1, 6)
 
     order_list = list(product(p_range, q_range))
+    eids       = train["engine_id"].unique()[:n_engines]
     best_pqs   = []
 
-    for did in sorted(train["dataset_id"].unique()):
-        eids = train[train["dataset_id"] == did]["engine_id"].unique()[:n_engines_per_dataset]
-        for eid in eids:
-            raw  = train[train["engine_id"] == eid].sort_values("cycle")["health_index"].values
-            smth = smooth_series(raw)
-            diff = np.diff(smth, n=d) if d > 0 else smth
+    for eid in eids:
+        raw  = train[train["engine_id"] == eid].sort_values("cycle")["health_index"].values
+        smth = smooth_series(raw)
+        diff = np.diff(smth, n=d) if d > 0 else smth
 
-            if len(diff) < max(p_range) + max(q_range) + 5:
-                continue
+        if len(diff) < max(p_range) + max(q_range) + 5:
+            continue
 
-            aic_df = optimize_ARMA(diff, order_list)
-            if aic_df.empty:
-                continue
+        aic_df = optimize_ARMA(diff, order_list)
+        if aic_df.empty:
+            continue
 
-            best_pq = aic_df.iloc[0]["(p,q)"]
-            best_pqs.append(tuple(best_pq))
-            print(f"  FD00{did} engine {eid}: best (p,q)={best_pq}  (AIC={aic_df.iloc[0]['AIC']})")
+        best_pq = aic_df.iloc[0]["(p,q)"]
+        best_pqs.append(tuple(best_pq))
+        print(f"  engine {eid}: best (p,q)={best_pq}  (AIC={aic_df.iloc[0]['AIC']})")
 
     if not best_pqs:
         print("  WARNING: no valid engines found, returning default (2,2)")
         return (2, 2)
 
-    modal_pq  = Counter(best_pqs).most_common(1)[0][0]
+    modal_pq       = Counter(best_pqs).most_common(1)[0][0]
     best_p, best_q = int(modal_pq[0]), int(modal_pq[1])
     print(f"\n→ Modal best ARMA order: ({best_p},{best_q})  "
           f"(from {len(best_pqs)} engines, freq={Counter(best_pqs).most_common(5)})")
@@ -533,23 +469,20 @@ def select_best_arima_order(
     d: int,
     p_range: range | None = None,
     q_range: range | None = None,
-    n_engines_per_dataset: int = 3,
+    n_engines: int = 5,
 ) -> tuple[int, int]:
     """
-    Sample N engines per FD dataset, run optimize_ARIMA on each ORIGINAL series,
-    return the modal best (p,q) across all engines.
+    Sample N engines, run optimize_ARIMA on each original series,
+    return modal best (p,q).
 
-    Note: passes original (un-differenced) smth to SARIMAX — it handles d internally.
-
-    Notebooks call this ONE function — no manual engine loop needed.
+    Passes original (un-differenced) series — SARIMAX handles d internally.
 
     Args:
-        train:                 full training DataFrame.
-        d:                     differencing order (from run_stationarity_report).
-        p_range:               range of p values. Defaults to range(1,6).
-        q_range:               range of q values. Defaults to range(1,6).
-        n_engines_per_dataset: engines to sample per FD subset.
-
+        train:    training DataFrame.
+        d:        differencing order from run_stationarity_report.
+        p_range:  range of p values. Defaults to range(1,6).
+        q_range:  range of q values. Defaults to range(1,6).
+        n_engines: engines to sample.
     Returns:
         (best_p, best_q): modal best (p,q) for ARIMA(p,d,q).
     """
@@ -559,30 +492,29 @@ def select_best_arima_order(
         q_range = range(1, 6)
 
     order_list = list(product(p_range, q_range))
+    eids       = train["engine_id"].unique()[:n_engines]
     best_pqs   = []
 
-    for did in sorted(train["dataset_id"].unique()):
-        eids = train[train["dataset_id"] == did]["engine_id"].unique()[:n_engines_per_dataset]
-        for eid in eids:
-            raw  = train[train["engine_id"] == eid].sort_values("cycle")["health_index"].values
-            smth = smooth_series(raw)   # ORIGINAL — no manual diff for ARIMA
+    for eid in eids:
+        raw  = train[train["engine_id"] == eid].sort_values("cycle")["health_index"].values
+        smth = smooth_series(raw)
 
-            if len(smth) < max(p_range) + d + max(q_range) + 5:
-                continue
+        if len(smth) < max(p_range) + d + max(q_range) + 5:
+            continue
 
-            aic_df = optimize_ARIMA(smth, order_list, d=d)
-            if aic_df.empty:
-                continue
+        aic_df = optimize_ARIMA(smth, order_list, d=d)
+        if aic_df.empty:
+            continue
 
-            best_pq = aic_df.iloc[0]["(p,q)"]
-            best_pqs.append(tuple(best_pq))
-            print(f"  FD00{did} engine {eid}: best (p,q)={best_pq}  (AIC={aic_df.iloc[0]['AIC']})")
+        best_pq = aic_df.iloc[0]["(p,q)"]
+        best_pqs.append(tuple(best_pq))
+        print(f"  engine {eid}: best (p,q)={best_pq}  (AIC={aic_df.iloc[0]['AIC']})")
 
     if not best_pqs:
         print("  WARNING: no valid engines found, returning default (2,2)")
         return (2, 2)
 
-    modal_pq   = Counter(best_pqs).most_common(1)[0][0]
+    modal_pq       = Counter(best_pqs).most_common(1)[0][0]
     best_p, best_q = int(modal_pq[0]), int(modal_pq[1])
     print(f"\n→ Modal best ARIMA order: ({best_p},{d},{best_q})  "
           f"(from {len(best_pqs)} engines, freq={Counter(best_pqs).most_common(5)})")
@@ -599,11 +531,8 @@ def check_residuals(
     plot_qq: bool = False,
 ) -> pd.DataFrame:
     """
-    Ljung-Box test on residuals. Required by book CH06 and CH07.
-
-    p > 0.05 for all lags → white noise → model adequate.
-    p < 0.05 for any lag  → residual autocorrelation → consider higher order.
-
+    Ljung-Box on residuals (CH06/CH07).
+    p > 0.05 all lags → white noise → adequate model.
     plot_qq=True adds QQ plot (CH07 ARIMA requirement).
     """
     lb_result = acorr_ljungbox(residuals, lags=np.arange(1, 11, 1), return_df=True)
@@ -611,8 +540,7 @@ def check_residuals(
     print(f"\nLjung-Box residual test — {model_name}")
     print(lb_result[["lb_stat", "lb_pvalue"]].to_string())
 
-    all_pass = (lb_result["lb_pvalue"] > 0.05).all()
-    if all_pass:
+    if (lb_result["lb_pvalue"] > 0.05).all():
         print("✓ All p-values > 0.05 — residuals are white noise (model is adequate)")
     else:
         print("✗ Some p-values < 0.05 — residual autocorrelation remains")
@@ -641,14 +569,8 @@ def rolling_forecast_engine(
     window: int = 1,
 ) -> np.ndarray:
     """
-    Walk-forward forecast on ONE engine's health_index series.
-    Mirrors the book's rolling_forecast exactly (CH05/CH06/CH07).
-
-    Args:
-        series:    complete health_index for one engine.
-        train_len: initial training window size.
-        order:     (p, d, q) — best from select_best_* functions.
-        window:    refit cadence. 1 = most accurate, slower.
+    Walk-forward forecast on one engine's series (CH05/CH06/CH07).
+    window=1 → one-step-ahead, most accurate.
     """
     p, d, q   = order
     total_len = len(series)
@@ -669,7 +591,7 @@ def rolling_forecast_engine(
 # ─────────────────────────────────────────────
 
 def smooth_series(series: np.ndarray, window: int = SMOOTH_WINDOW) -> np.ndarray:
-    """Rolling-median smoother. Applied before any model fit."""
+    """Rolling-median smoother applied before any model fit."""
     series = np.asarray(series, dtype=float)
     if window <= 1 or len(series) < 2:
         return series
@@ -685,27 +607,47 @@ def _linear_extrapolation_rul(
     threshold: float,
     tail: int | None = None,
 ) -> float:
-    """
-    Fallback: linear trend on tail of observed series → extrapolate to threshold.
-    Used when forecast never crosses threshold within MAX_HORIZON.
-    """
     if tail is None:
         tail = max(5, min(30, int(0.2 * len(series))))
-
     y = series[-tail:] if len(series) >= tail else series
     if len(y) < 3:
-        return float(RUL_CAP)
+        return _health_index_to_rul(float(series[-1]))
 
     x                = np.arange(len(y), dtype=float)
     slope, intercept = np.polyfit(x, y, 1)
-    last             = float(y[-1])
 
-    if slope <= 1e-6:
-        return float(RUL_CAP)
+    if slope <= 1e-4:
+        # Flat tail — use regressor instead of capping at 125
+        return _health_index_to_rul(float(series[-1]))
 
-    steps = (threshold - last) / slope
+    steps = (threshold - float(y[-1])) / slope
     return float(min(max(steps, 0.0), RUL_CAP))
 
+# Module-level variable — set once by fit_rul_from_health_index()
+_RUL_REGRESSOR = None   # stores (slope, intercept) from train fit
+
+def fit_rul_from_health_index(train: pd.DataFrame) -> None:
+    """
+    Fit a linear mapping: health_index → RUL on training data.
+    Called once after build_pca_health_index in each notebook.
+    Used as fallback for engines where forecast slope is too flat.
+    """
+    global _RUL_REGRESSOR
+    x      = train["health_index"].values
+    y      = train["RUL"].values
+    slope, intercept = np.polyfit(x, y, 1)
+    _RUL_REGRESSOR   = (float(slope), float(intercept))
+    r2 = 1 - np.sum((y - (slope * x + intercept))**2) / np.sum((y - y.mean())**2)
+    print(f"  RUL regressor: RUL = {slope:.2f} * hi + {intercept:.2f}  (R2={r2:.3f})")
+
+
+def _health_index_to_rul(health_index_val: float) -> float:
+    """Predict RUL from current health_index using fitted regressor."""
+    if _RUL_REGRESSOR is None:
+        return float(RUL_CAP)
+    slope, intercept = _RUL_REGRESSOR
+    pred = slope * health_index_val + intercept
+    return float(np.clip(pred, 0.0, RUL_CAP))
 
 def _estimate_rul_from_forecast(
     preds: np.ndarray,
@@ -713,18 +655,62 @@ def _estimate_rul_from_forecast(
     threshold: float = None,
 ) -> float:
     """
-    Find first forecast step that crosses threshold → that index = RUL.
-    Falls back to linear extrapolation if no crossing within MAX_HORIZON.
+    1. Direct crossing within forecast horizon → return that step.
+    2. No crossing → fit slope to forecast tail → extrapolate to threshold.
+    3. Flat/negative forecast → fall back to observed series.
     """
     preds = np.asarray(preds, dtype=float)
     if preds.size == 0 or not np.all(np.isfinite(preds)):
-        return _linear_extrapolation_rul(observed, threshold)
+        return _health_index_to_rul(float(observed[-1]))
 
+    # Step 1: direct crossing within forecast
     crossings = np.where(preds >= threshold)[0]
     if crossings.size > 0:
         return float(crossings[0])
 
-    return _linear_extrapolation_rul(observed, threshold)
+    # Step 2: forecast slope extrapolation (last 50% of forecast)
+    tail_start = max(1, len(preds) // 2)
+    tail       = preds[tail_start:]
+    x          = np.arange(len(tail), dtype=float)
+    f_slope, _ = np.polyfit(x, tail, 1)
+
+    if f_slope > 1e-4:
+        extra     = (threshold - float(preds[-1])) / f_slope
+        total_rul = float(len(preds)) + extra
+        return float(np.clip(total_rul, 0.0, RUL_CAP))
+
+    # Step 3: forecast flat — use health_index → RUL regressor
+    # More informative than linear extrapolation on flat observed tail
+    return _health_index_to_rul(float(observed[-1]))
+
+def _invert_diff(
+    diff_preds: np.ndarray,
+    original: np.ndarray,
+    d: int,
+) -> np.ndarray:
+    """
+    Invert d levels of differencing on forecast values.
+
+    d=2: diff2 → diff1 (seed = last observed velocity) → level (seed = last observed value)
+    d=1: diff1 → level only.
+    d=0: no inversion.
+    """
+    preds = np.asarray(diff_preds, dtype=float)
+    if d == 0:
+        return preds
+
+    seeds = []
+    temp  = original.copy()
+    for _ in range(d):
+        seeds.append(np.diff(temp, n=1)[-1])
+        temp = np.diff(temp, n=1)
+
+    current = preds
+    for level in range(d - 1, -1, -1):
+        seed    = seeds[level] if level < len(seeds) else original[-1]
+        current = seed + np.cumsum(current)
+
+    return current
 
 
 # ─────────────────────────────────────────────
@@ -735,30 +721,18 @@ def predict_rul_ar(
     series: np.ndarray,
     threshold: float,
     p: int = DEFAULT_AR_P,
-    d: int = DEFAULT_ARIMA_D,   # pre-diff before fitting since AR uses d=0
+    d: int = DEFAULT_ARIMA_D,
     smooth_window: int = SMOOTH_WINDOW,
 ) -> float:
-    """
-    AR(p) forecast via SARIMAX(order=(p, 0, 0)) on diff-d series.
-
-    d is applied manually (np.diff) since AR = ARIMA(p,0,0).
-    Forecast is inverted back to original scale before RUL estimation.
-    """
+    """AR(p) on diff-d series. Forecast inverted back to original scale."""
     smoothed = smooth_series(series, smooth_window)
-
     if len(smoothed) <= p + d + 5:
         return _linear_extrapolation_rul(smoothed, threshold)
-
     try:
-        diff_series = np.diff(smoothed, n=d) if d > 0 else smoothed
-
-        model = SARIMAX(diff_series, order=(p, 0, 0), simple_differencing=False)
-        res   = model.fit(disp=False)
+        diff       = np.diff(smoothed, n=d) if d > 0 else smoothed
+        res        = SARIMAX(diff, order=(p, 0, 0), simple_differencing=False).fit(disp=False)
         diff_preds = res.forecast(steps=MAX_HORIZON)
-
-        # Invert differencing to restore original health_index scale
         level_preds = _invert_diff(diff_preds, smoothed, d)
-
         return _estimate_rul_from_forecast(level_preds, smoothed, threshold)
     except Exception:
         return _linear_extrapolation_rul(smoothed, threshold)
@@ -773,30 +747,18 @@ def predict_rul_arma(
     threshold: float,
     p: int = DEFAULT_ARMA_P,
     q: int = DEFAULT_ARMA_Q,
-    d: int = DEFAULT_ARIMA_D,   # pre-diff manually — ARMA uses d=0
+    d: int = DEFAULT_ARIMA_D,
     smooth_window: int = SMOOTH_WINDOW,
 ) -> float:
-    """
-    ARMA(p,q) on diff-d series via SARIMAX(order=(p, 0, q)).
-
-    d is applied manually (np.diff), forecast inverted back to original scale.
-    This is equivalent to ARIMA(p,d,q) but uses the ARMA interface as the book does.
-    """
+    """ARMA(p,q) on diff-d series. Forecast inverted back to original scale."""
     smoothed = smooth_series(series, smooth_window)
-
     if len(smoothed) <= p + q + d + 3:
         return _linear_extrapolation_rul(smoothed, threshold)
-
     try:
-        diff_series = np.diff(smoothed, n=d) if d > 0 else smoothed
-
-        model      = SARIMAX(diff_series, order=(p, 0, q), simple_differencing=False)
-        res        = model.fit(disp=False)
+        diff       = np.diff(smoothed, n=d) if d > 0 else smoothed
+        res        = SARIMAX(diff, order=(p, 0, q), simple_differencing=False).fit(disp=False)
         diff_preds = res.forecast(steps=MAX_HORIZON)
-
-        # Invert differencing: diff-d preds → original health_index scale
         level_preds = _invert_diff(diff_preds, smoothed, d)
-
         return _estimate_rul_from_forecast(level_preds, smoothed, threshold)
     except Exception:
         return _linear_extrapolation_rul(smoothed, threshold)
@@ -814,78 +776,16 @@ def predict_rul_arima(
     q: int = DEFAULT_ARIMA_Q,
     smooth_window: int = SMOOTH_WINDOW,
 ) -> float:
-    """
-    ARIMA(p,d,q) via SARIMAX(order=(p, d, q)).
-
-    Passes ORIGINAL series — SARIMAX handles differencing and inversion internally.
-    This is more numerically stable than manual inversion in predict_rul_arma.
-    """
+    """ARIMA(p,d,q) via SARIMAX. Passes original series — SARIMAX handles differencing."""
     smoothed = smooth_series(series, smooth_window)
-
     if len(smoothed) <= p + d + q + 3:
         return _linear_extrapolation_rul(smoothed, threshold)
-
     try:
-        model = SARIMAX(smoothed, order=(p, d, q), simple_differencing=False)
-        res   = model.fit(disp=False)
+        res   = SARIMAX(smoothed, order=(p, d, q), simple_differencing=False).fit(disp=False)
         preds = res.forecast(steps=MAX_HORIZON)
         return _estimate_rul_from_forecast(preds, smoothed, threshold)
     except Exception:
         return _linear_extrapolation_rul(smoothed, threshold)
-
-
-# ─────────────────────────────────────────────
-# 12b. DIFFERENCING INVERSION UTILITY
-# ─────────────────────────────────────────────
-
-def _invert_diff(
-    diff_preds: np.ndarray,
-    original: np.ndarray,
-    d: int,
-) -> np.ndarray:
-    """
-    Invert np.diff(original, n=d) applied to forecast values.
-
-    Logic for d=2 (generalises to any d):
-        diff2_preds → diff1_preds:
-            seed = original[-1] - original[-2]   (last observed velocity)
-            diff1_preds = seed + cumsum(diff2_preds)
-
-        diff1_preds → level_preds:
-            seed = original[-1]                  (last observed level)
-            level_preds = seed + cumsum(diff1_preds)
-
-    For d=1: only the second step above is needed.
-    For d=0: no inversion needed, return diff_preds unchanged.
-    """
-    preds = np.asarray(diff_preds, dtype=float)
-
-    if d == 0:
-        return preds
-
-    # Iteratively invert one difference at a time, from highest order down to level
-    # seeds[k] = last value of the k-th difference of original
-    #   seeds[d]   = original[-1]                      (level)
-    #   seeds[d-1] = first diff of original: [-1] - [-2]
-    #   seeds[d-2] = second diff ...
-    # We invert from order d down to order 0
-
-    # Compute seeds for each level of differentiation
-    seeds = []
-    temp  = original.copy()
-    for _ in range(d):
-        seeds.append(np.diff(temp, n=1)[-1])   # last value of each diff level
-        temp = np.diff(temp, n=1)
-    # seeds[0] = last of diff-1, seeds[1] = last of diff-2, ...
-    # We invert from innermost (diff-d) outward to level
-
-    current = preds
-    for level in range(d - 1, -1, -1):
-        # seed for this inversion level
-        seed    = seeds[level] if level < len(seeds) else original[-1]
-        current = seed + np.cumsum(current)
-
-    return current
 
 
 # ─────────────────────────────────────────────
@@ -895,28 +795,26 @@ def _invert_diff(
 def predict_dataset(
     df: pd.DataFrame,
     predict_fn: Callable[[np.ndarray], float],
-    threshold_map: dict[int, float],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    threshold: float,
+) -> tuple[np.ndarray, np.ndarray]:
     """
-    Apply predict_fn to every engine in df. Returns (y_true, y_pred, dataset_ids).
+    Apply predict_fn to every engine in df.
+    Returns (y_true, y_pred) — one entry per engine.
 
-    predict_fn must already have p/d/q bound via functools.partial.
-    threshold is injected per dataset_id from threshold_map.
-    Logs fallback rate.
+    predict_fn must have p/d/q bound via functools.partial.
+    threshold is a single float (not a dict).
     """
     df = df.sort_values(["engine_id", "cycle"])
 
-    y_true, y_pred, dids = [], [], []
-    fallback_count = 0
-    total_count    = 0
+    y_true, y_pred  = [], []
+    fallback_count  = 0
+    total_count     = 0
 
     for _, g in df.groupby("engine_id", sort=False):
         series   = g["health_index"].values
         true_rul = float(g["RUL"].iloc[-1])
-        did      = int(g["dataset_id"].iloc[0])
-        thresh   = threshold_map.get(did, list(threshold_map.values())[0])
 
-        pred_raw = predict_fn(series, threshold=thresh)
+        pred_raw = predict_fn(series, threshold=threshold)
         pred     = float(np.clip(pred_raw, 0.0, RUL_CAP))
 
         if pred == float(RUL_CAP):
@@ -925,13 +823,11 @@ def predict_dataset(
 
         y_true.append(true_rul)
         y_pred.append(pred)
-        dids.append(did)
 
     fallback_rate = 100.0 * fallback_count / total_count if total_count > 0 else 0.0
-    print(f"  Fallback rate (linear extrapolation proxy): {fallback_rate:.1f}%  "
-          f"({fallback_count}/{total_count} engines)")
+    print(f"  Fallback rate: {fallback_rate:.1f}%  ({fallback_count}/{total_count} engines)")
 
-    return np.array(y_true), np.array(y_pred), np.array(dids)
+    return np.array(y_true), np.array(y_pred)
 
 
 # ─────────────────────────────────────────────
@@ -945,17 +841,18 @@ def simulate_test_from_train(
     max_engines: int | None = None,
 ) -> pd.DataFrame:
     """
-    Create simulated validation set by truncating training engine histories.
-    cutoff_range=(0.2, 0.9) covers early-life engines matching real test set.
+    Simulated validation set by truncating training engine histories.
+    cutoff_range=(0.2, 0.9) matches the distribution of the real test set.
     """
-    rng  = np.random.default_rng(random_seed)
-    rows = []
-
+    rng     = np.random.default_rng(random_seed)
     engines = train_df["engine_id"].unique()
+
     if max_engines is not None and len(engines) > max_engines:
         engines = rng.choice(engines, size=max_engines, replace=False)
 
     lo_frac, hi_frac = cutoff_range
+    rows = []
+
     for eid in engines:
         g = train_df[train_df["engine_id"] == eid].sort_values("cycle")
         n = len(g)
