@@ -1,4 +1,5 @@
 # Aircraft Engine Failure Forecasting — Deep Understanding Report
+
 ### NASA C-MAPSS FD004 · IT 402 Applied Forecasting Methods
 
 ---
@@ -62,8 +63,9 @@ After preprocessing we have 14 sensor columns per row. For the deep learning mod
 We need to compress 14 numbers into **one number that measures degradation**. This is the Health Index.
 
 The goal: a number that
+
 - starts near some baseline value when the engine is healthy
-- increases monotonically over time as the engine degrades  
+- increases monotonically over time as the engine degrades
 - is comparable across all 248 engines regardless of which operating conditions they flew through
 - tells ARIMA something meaningful to forecast
 
@@ -116,13 +118,16 @@ detrended_value = smoothed_value − cluster_mean[op_cluster][sensor]
 **What does this achieve?**
 
 Before detrending:
+
 ```
 Cycle 50, Cluster 0 (sea level), s3_rmean_10 = +0.8   ← engine A
 Cycle 51, Cluster 3 (high alt), s3_rmean_10 = -0.6   ← same engine A, next cycle, different condition
 ```
+
 That -1.4 swing from cycle 50 to 51 is entirely due to altitude change. Engine A is in exactly the same health state.
 
 After detrending (subtracting the mean for each cluster):
+
 ```
 Cluster 0 mean for s3 = +0.7
 Cluster 3 mean for s3 = -0.7
@@ -227,6 +232,7 @@ health_index R2 with RUL (post-monotone): −5.188  (target: > 0.3)
 **What you are looking at:** The health index over cycles for three different FD004 engines. The x-axis is the cycle number (each cycle = one flight). The y-axis is the health index value.
 
 **What this tells us:**
+
 - All three engines start near −1.0 (healthy baseline after standardisation)
 - All three end at roughly 2.0–3.5 (severely degraded, near failure)
 - The shape is not a straight line — it's relatively flat for a long period (slow degradation phase) and then accelerates sharply near the end (rapid degradation phase near failure)
@@ -342,7 +348,8 @@ If those differences are also trending (the step size is accelerating), we diffe
 2nd diff:    +0.00, +0.01, +0.01, +0.02            ← roughly constant → stationary
 ```
 
-**The ADF Test** (Augmented Dickey-Fuller) formally tests whether a series is stationary.  
+**The ADF Test** (Augmented Dickey-Fuller) formally tests whether a series is stationary.
+
 - Null hypothesis: the series is non-stationary (has a unit root)
 - p-value < 0.05 → reject null → series IS stationary → stop differencing
 - p-value ≥ 0.05 → fail to reject null → series is NOT stationary → difference once more
@@ -396,13 +403,15 @@ Across the full 248 training engines: **206 engines need d=2, 42 need d=1, 0 nee
 
 After determining d=2, we work on the twice-differenced series to find p and q.
 
-**What is ACF?** Autocorrelation Function. It measures the correlation between the series and a lagged version of itself.  
-- ACF at lag 1: how much does today's value correlate with yesterday's?  
+**What is ACF?** Autocorrelation Function. It measures the correlation between the series and a lagged version of itself.
+
+- ACF at lag 1: how much does today's value correlate with yesterday's?
 - ACF at lag 5: how much does today's value correlate with the value 5 steps ago?
 
 **What is PACF?** Partial Autocorrelation Function. It measures the same thing but removes the indirect effects. PACF at lag 3 asks: "how much does the value 3 steps ago directly predict today, after already accounting for the values at lags 1 and 2?"
 
 **Reading the plots:**
+
 - Blue shaded band = 95% confidence interval. Bars inside the band are not statistically significant.
 - **For AR order p**: look at the PACF. Where does it first drop inside the band after some initial significant lags? That lag = p.
 - **For MA order q**: look at the ACF. Same rule.
@@ -493,6 +502,7 @@ engine 15: best (p,q)=(3,3)  (AIC= −936.46)
 ```
 
 **Final chosen orders:**
+
 - AR: `(p=10, d=2, q=0)` → SARIMAX(10, 2, 0)
 - ARMA: `(p=1, d=2, q=1)` → SARIMAX(1, 2, 1)
 - ARIMA: `(p=1, d=2, q=1)` → SARIMAX(1, 2, 1)
@@ -536,7 +546,8 @@ sigma2      0.0003  8.81e−6   30.073   0.000   ← noise variance
 
 After fitting the model, we check: did the model capture all the patterns? If yes, the **residuals** (actual − predicted) should look like pure random noise.
 
-**Ljung-Box test** checks for any remaining autocorrelation in the residuals.  
+**Ljung-Box test** checks for any remaining autocorrelation in the residuals.
+
 - p > 0.05 for all tested lags → no remaining pattern → residuals are white noise → model is adequate
 - p < 0.05 → residual autocorrelation remains → model missed some structure
 
@@ -581,12 +592,14 @@ Before applying the model to test data, we validate it on training engines using
 ![AR rolling forecast](report_images/T08_AR_model_book_cell18_img0.png)
 
 **What you are looking at:**
+
 - **Blue solid line**: the actual observed health_index for engine 118 (all 543 cycles)
 - **Orange dashed line**: the AR(10) one-step-ahead rolling forecast on the validation portion (after the grey dotted vertical line at cycle ~380)
 - **Grey dotted vertical line**: the train/val split point (first 70% = training, last 30% = validation)
 - **Red dashed horizontal line**: the failure threshold at 1.685
 
 **Key observations:**
+
 1. The orange forecast tracks the blue observed line almost perfectly after the split. Rolling forecast RMSE = 0.0280 (very small in health_index units).
 2. The forecast crosses the failure threshold at approximately cycle 480. Engine 118 is in the training set and fails at cycle 543 — the model would predict roughly 60 cycles of RUL from cycle 480, which is correct.
 3. In the first half (cycles 0–380), the health index is flat near −1. There is nothing to forecast here — the engine is healthy. This is where many test engines are truncated.
@@ -628,6 +641,7 @@ If the forecast never crosses the threshold within 150 steps → use slope extra
 **True RUL = 6 cycles. Predicted RUL = 10 cycles.**
 
 **What you are seeing:**
+
 - **Blue solid line**: observed health_index history from engine 31's test sequence. It starts near −0.5, rises steeply in recent cycles, and is near 1.4 at the last observed cycle (grey dotted vertical line at cycle ~135)
 - **Orange dashed line**: ARIMA forecast from the last observed point forward
 - **Orange shaded band**: 80% confidence interval of the forecast — widens as we project further
@@ -646,6 +660,7 @@ This is a good prediction. True RUL = 6, predicted = 10. The model correctly see
 **True RUL = 15 cycles. Predicted RUL = 26 cycles.**
 
 **What you are seeing:**
+
 - The engine's health_index at the truncation point (grey vertical line at cycle ~130) is approximately 1.35 — already in the high-degradation zone but not quite at the threshold
 - The ARIMA forecast projects the health_index to cross 1.685 (green dot) at approximately cycle 150 — 26 steps after truncation
 - The confidence interval is narrow near the observed data and fans out as we project forward
@@ -660,6 +675,7 @@ This is a good prediction. True RUL = 6, predicted = 10. The model correctly see
 **True RUL = 85 cycles. Predicted RUL = 71 cycles.**
 
 **What you are seeing:**
+
 - The engine's health_index at truncation (grey vertical line at cycle ~80) is approximately −0.3 — still in the healthy zone, far from the failure threshold
 - The ARIMA forecast rises slowly from −0.3, reaching 1.685 (green dot) at approximately cycle 150 — 71 steps after truncation
 - True RUL = 85, predicted = 71 → error = −14 (14 cycles early, conservative but acceptable)
@@ -691,6 +707,7 @@ The **safety factor of 0.88** is then applied: `final_prediction = clipped_predi
 # PART 8: FINAL RESULTS — ALL THREE CLASSICAL MODELS
 
 ### AR(10, d=2, q=0) Results:
+
 ```
 RMSE       : 27.67
 NASA Score : 25,742  (mean per engine: 103.8)
@@ -699,6 +716,7 @@ Bias       : −4.74  (slightly early → conservative)
 ```
 
 ### ARMA(1, d=2, 1) Results:
+
 ```
 RMSE       : 26.19
 NASA Score : 17,514  (mean per engine: 70.6)
@@ -707,6 +725,7 @@ Bias       : −1.53  (nearly unbiased)
 ```
 
 ### ARIMA(1, 2, 1) Results:
+
 ```
 RMSE       : 24.76
 NASA Score : 13,791  (mean per engine: 55.6)
@@ -728,7 +747,8 @@ The NASA Score is high (large numbers = worse) because even a few large late-pre
 
 ![AR predictions three panel](report_images/T10_ARIMA_model_book_cell25_img0.png)
 
-**Left panel — Scatter plot:** Each dot is one test engine. Perfect predictions would all lie on the red diagonal line. What we see: 
+**Left panel — Scatter plot:** Each dot is one test engine. Perfect predictions would all lie on the red diagonal line. What we see:
+
 - Engines with low true RUL (left side) are predicted at various values — some correctly near zero, some predicted at 110 (the FALLBACK value)
 - Engines with high true RUL (right side, true RUL ≈ 125 due to capping) tend to be predicted around 110 — a conservative underestimate
 - There's a cluster of dots at predicted = 110 regardless of true RUL — these are the FALLBACK predictions
