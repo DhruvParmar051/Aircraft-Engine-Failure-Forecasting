@@ -99,27 +99,37 @@ def scale_sensors(
     test: pd.DataFrame,
     sensor_cols: list[str],
     n_op_clusters: int = N_OP_CLUSTERS,
-) -> tuple[pd.DataFrame, pd.DataFrame, KMeans, dict]:
+) -> tuple[pd.DataFrame, pd.DataFrame, KMeans, dict, list[str]]:
     """
-    Full scaling pipeline — no leakage:
-    1. Fit KMeans on train op settings (adaptive k)
-    2. Assign op_cluster to train and test using same KMeans
-    3. Fit one StandardScaler per op_cluster on train only
-    4. Transform both train and test with those scalers
-
-    Returns (train_scaled, test_scaled, km, scalers).
+    Full scaling pipeline with automatic dead-sensor removal.
+    Returns (train_scaled, test_scaled, km, scalers, updated_sensor_cols).
     """
+    # 1. Fit & Assign Clusters
     km    = fit_op_clusters(train, n_clusters=n_op_clusters)
     train = assign_op_clusters(train, km)
     test  = assign_op_clusters(test,  km)
 
+    # 2. Identify sensors that are constant in ANY cluster
+    dead_sensors = set()
+    for _, group_df in train.groupby("op_cluster"):
+        # Find columns where standard deviation is zero
+        stds = group_df[sensor_cols].std()
+        zero_variance_cols = stds[stds == 0].index.tolist()
+        dead_sensors.update(zero_variance_cols)
+    
+    if dead_sensors:
+        print(f"  [INFO] Dropping sensors constant in at least one cluster: {list(dead_sensors)}")
+        sensor_cols = [c for c in sensor_cols if c not in dead_sensors]
+
+    # 3. Fit & Apply Scalers on the REMAINING sensors
     scalers = fit_scalers(train, sensor_cols)
     train   = apply_scalers(train, scalers, sensor_cols)
     test    = apply_scalers(test,  scalers, sensor_cols)
 
     print(f"  fitted {len(scalers)} StandardScalers across {len(scalers)} op_clusters")
-    return train, test, km, scalers
-
+    
+    # Return the updated sensor_cols so the rest of your notebook knows what's left
+    return train, test, km, scalers, sensor_cols
 
 def save_scaling_artifacts(
     km: KMeans,

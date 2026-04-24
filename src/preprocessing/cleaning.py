@@ -5,7 +5,6 @@ drops sensors with near-zero variance that carry no degradation signal
 
 import pandas as pd
 
-KNOWN_CONSTANT_SENSORS = ["s1", "s5", "s6", "s10", "s16", "s18", "s19"]
 ALL_SENSOR_COLS        = [f"s{i}" for i in range(1, 22)]
 VARIANCE_THRESHOLD     = 0.1
 
@@ -25,7 +24,7 @@ def find_low_variance_sensors(
     data_driven     = stds[stds < threshold].index.tolist()
 
     # union with known constants
-    to_drop = sorted(set(data_driven) | set(KNOWN_CONSTANT_SENSORS))
+    to_drop = sorted(set(data_driven))
     return to_drop
 
 

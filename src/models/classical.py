@@ -573,7 +573,7 @@ def check_residuals(
         print("✗ Some p-values < 0.05 — residual autocorrelation remains")
 
     if plot_qq:
-        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        fig, axes = plt.subplots(2, 1, figsize=(12, 8))
         qqplot(residuals, line="s", ax=axes[0])
         axes[0].set_title(f"QQ plot — {model_name} residuals")
         axes[1].plot(residuals)
