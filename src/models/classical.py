@@ -1011,7 +1011,6 @@ def validate_model_rolling(
 
     axes[-1].set_xlabel("Cycle")
     plt.tight_layout()
-    plt.savefig(f"{model_name}_rolling_validation.png", dpi=150)
     plt.show()
 
     # ── Summary ───────────────────────────────────────────────────────
