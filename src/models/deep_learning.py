@@ -10,6 +10,14 @@ and plotting functions used by all four DL model notebooks:
 
 Import in each notebook with:
     from deep_learning import *
+
+Loss function
+-------------
+Training uses ``NASALoss`` (the official CMAPSS asymmetric scoring function)
+rather than plain MSE.  Late predictions (pred > true) are penalised with
+exp(d/10)−1 while early predictions use exp(−d/13)−1 — a steeper ramp for
+the operationally dangerous direction.  Pass ``loss_fn=nn.MSELoss()`` to
+``train_model()`` to restore the original symmetric behaviour.
 """
 
 import sys, os
@@ -23,6 +31,43 @@ from matplotlib.patches import Patch
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NASA ASYMMETRIC LOSS
+# ══════════════════════════════════════════════════════════════════════════════
+
+class NASALoss(nn.Module):
+    """
+    NASA CMAPSS asymmetric loss function for RUL prediction.
+
+    Directly optimises the official competition metric so the model is
+    penalised harder for *late* predictions (overestimating RUL) than for
+    *early* ones — matching the operational reality that missing a failure is
+    more dangerous than scheduling maintenance too soon.
+
+    Formula  (d = pred − true):
+        d <  0  (early prediction)  →  exp(−d / 13) − 1   ← slow ramp
+        d >= 0  (late  prediction)  →  exp( d / 10) − 1   ← steep ramp
+
+    Gradient magnitude at the same |d|:
+        late   1/10 · exp( d/10)  >  early  1/13 · exp(-d/13)
+    ⟹ Adam receives ~1.35× larger gradient for a late miss than for the same
+       sized early miss, nudging predictions toward the conservative side.
+
+    Returns the per-batch MEAN loss (suitable for mini-batch SGD).
+    Note: the evaluation ``nasa_score()`` in metrics.py returns the SUM over
+    all test engines — same asymmetry, different aggregation.
+    """
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        d = pred - target
+        loss = torch.where(
+            d < 0,
+            torch.exp(-d / 13.0) - 1.0,   # early — conservative penalty
+            torch.exp( d / 10.0) - 1.0,   # late  — aggressive penalty
+        )
+        return loss.mean()
 
 # ── Project root (two levels above this file) ─────────────────────────────────
 ROOT = Path(os.getcwd()).resolve().parents[1]
@@ -227,29 +272,38 @@ def train_model(
     lr: float = LR,
     model_name: str = "model",
     patience: int = PATIENCE,
+    loss_fn: nn.Module | None = None,
 ) -> tuple[nn.Module, list[float], list[float]]:
     """
-    Train *model* with MSE loss, Adam, LR-on-plateau, and early stopping.
+    Train *model* with NASA asymmetric loss (default), Adam, LR-on-plateau,
+    and early stopping.
 
     Logic
     -----
     1. Adam + ReduceLROnPlateau (halves LR after 5 stagnant epochs).
-    2. Each batch: forward → MSE → backward → grad-clip (max_norm=1) → step.
+    2. Each batch: forward → NASA loss → backward → grad-clip (max_norm=1) → step.
     3. After each epoch: validate, update scheduler, check best/early-stop.
     4. Restores the best-val-loss weights before returning.
+
+    Parameters
+    ----------
+    loss_fn : nn.Module, optional
+        Loss function to use. Defaults to ``NASALoss()`` (asymmetric,
+        penalises late predictions harder). Pass ``nn.MSELoss()`` to
+        replicate the original symmetric training.
 
     Returns
     -------
     model        : nn.Module with best weights loaded
-    train_losses : list of per-epoch train MSE
-    val_losses   : list of per-epoch val MSE
+    train_losses : list of per-epoch train loss
+    val_losses   : list of per-epoch val loss
     """
     model     = model.to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, patience=5, factor=0.5
     )
-    criterion = nn.MSELoss()
+    criterion = loss_fn if loss_fn is not None else NASALoss()
 
     best_val_loss = float("inf")
     best_weights  = None
@@ -296,10 +350,11 @@ def train_model(
             no_improve += 1
 
         if epoch % 10 == 0:
+            loss_name = type(criterion).__name__
             print(
                 f"  [{model_name}] Epoch {epoch:3d} | "
                 f"train={train_loss:.4f} | val={val_loss:.4f} | "
-                f"best={best_val_loss:.4f}"
+                f"best={best_val_loss:.4f}  [{loss_name}]"
             )
 
         if no_improve >= patience:
@@ -346,14 +401,23 @@ def plot_loss_curves(
     train_losses: list[float],
     val_losses: list[float],
     model_name: str = "Model",
+    loss_name: str = "NASA Loss",
 ) -> None:
-    """Plot train vs. validation MSE loss curves."""
+    """
+    Plot train vs. validation loss curves.
+
+    Parameters
+    ----------
+    loss_name : str
+        Label for the y-axis. Defaults to ``"NASA Loss"`` (the new default
+        training criterion). Pass ``"MSE Loss"`` when using ``nn.MSELoss()``.
+    """
     fig, ax = plt.subplots(figsize=(9, 3))
     ax.plot(train_losses, label="Train loss", color="steelblue")
     ax.plot(val_losses,   label="Val loss",   color="orange", ls="--")
     ax.set_xlabel("Epoch")
-    ax.set_ylabel("MSE Loss")
-    ax.set_title(f"{model_name} — Training Curve")
+    ax.set_ylabel(loss_name)
+    ax.set_title(f"{model_name} — Training Curve ({loss_name})")
     ax.legend()
     plt.tight_layout()
     plt.show()
@@ -440,16 +504,4 @@ def plot_comparison(combined: dict) -> None:
     ])
 
     plt.tight_layout()
-    plt.savefig("model_comparison.png", dpi=150)
     plt.show()
-    print("Saved: model_comparison.png")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# QUICK SANITY CHECK (run: python deep_learning.py)
-# ══════════════════════════════════════════════════════════════════════════════
-if __name__ == "__main__":
-    print(f"Device : {DEVICE}")
-    print(f"ROOT   : {ROOT}")
-    print(f"PROC_DIR exists: {PROC_DIR.exists()}")
-    print("Constants and utilities loaded successfully.")
