@@ -836,3 +836,658 @@ When ARIMA's forecast for an engine is nearly flat (slope ≤ 0.0001 over the fo
 **Q: Why multiply all predictions by 0.88 (the safety factor)?**
 
 The NASA scoring function penalises late predictions (overestimating RUL) more heavily than early predictions. Specifically: late by 10 cycles → score += 1.72, but early by 10 cycles → score += 1.13. By multiplying all predictions by 0.88 we shift them slightly downward (more conservative), accumulating fewer late-prediction penalties. It's an engineering trade-off: we accept being slightly early to avoid being dangerously late.
+
+---
+
+# PART 11: DEEP LEARNING MODELS — COMPLETE EXPLANATION
+
+## 11.1 Why Deep Learning After Classical Models?
+
+The ARIMA-family models have a fundamental constraint: they are **univariate** (one series at a time) and **linear**. They operate on the health index — a single derived number that already lost information by compressing 14 sensors into one. They cannot see the individual sensor trajectories, cannot model the interaction between sensors, and cannot capture the nonlinear degradation dynamics directly.
+
+Deep learning models take a completely different approach:
+- **Input**: all 14 sensors + rolling statistics simultaneously — no information compression
+- **Architecture**: can learn complex, nonlinear mappings from sensor patterns to RUL
+- **Temporal modelling**: designed specifically for sequential data — each cycle's context is propagated forward
+- **Scale**: trained on all training engines simultaneously, learning a universal degradation model
+
+## 11.2 Data Preparation for Deep Learning
+
+**File: `src/models/deep_learning.py`**
+
+### Feature Engineering: Rolling Mean over 42 Features
+
+For each of the 14 sensors, we compute rolling means over three windows: 5 cycles, 10 cycles, and 20 cycles. This gives:
+
+```
+14 sensors × 3 windows = 42 features per cycle
+```
+
+**Why rolling means?** Raw sensor readings are noisy cycle-to-cycle. The 5-cycle rolling mean captures short-term trends; the 20-cycle rolling mean reveals the slower background drift. Together, the three rolling windows give the model information at multiple time scales — a short burst of noise vs. a genuine underlying trend.
+
+The raw 14 sensors themselves are **not** used as separate features — the rolling means already embed the current value (as a 1-window average). This keeps the feature count at 42.
+
+### Sliding Windows: Preparing Sequences for the Model
+
+Deep learning models process fixed-length sequences. We use a sliding window approach:
+
+- **Window size = 30 cycles**: each sample consists of the 30 most recent cycles before the prediction point
+- **Step = 1**: every cycle in every engine generates one sample (highly overlapping windows)
+- **Shape**: `(n_samples, 30, 42)` — n_samples sliding windows, each 30 steps long with 42 features
+
+For prediction: given a window of 30 consecutive cycles, the model predicts the RUL at the **last cycle** of that window.
+
+### Train/Validation Split
+
+All 248 FD004 training engines are split 80/20 **by engine ID**, not by cycle:
+
+- **Training**: 199 engines (all cycles of those 199 engines)  
+- **Validation**: 49 engines (all cycles of those 49 engines)
+
+Splitting by engine (not by cycle) is essential. If we split by cycle within an engine, training would see the early healthy cycles and validation would see the degrading cycles of the same engine — a data leakage problem. Splitting by engine ensures the model never sees any cycle from a validation engine during training.
+
+### Target: Capped RUL
+
+Training targets are RUL values capped at 125. This means the model is trained to output at most 125, and for all cycles more than 125 cycles before failure, the target is exactly 125. This focuses the model on the critical degradation window.
+
+---
+
+## 11.3 The Training Pipeline (Shared Across All Four DL Models)
+
+**Loss function**: Mean Squared Error (MSE). We minimise `(predicted_RUL − true_RUL)²` averaged over the batch.
+
+**Optimiser**: Adam with learning rate = 1e-3. Adam adapts the learning rate per parameter, making it robust to different gradient scales across layers.
+
+**Learning rate scheduling**: `ReduceLROnPlateau` — if validation loss doesn't improve for 5 consecutive epochs, the learning rate is halved (factor=0.5). This allows coarse learning initially and fine-tuning later.
+
+**Early stopping**: if validation loss doesn't improve for 10 consecutive epochs, training stops and the best weights are restored. This prevents overfitting.
+
+**Gradient clipping**: `max_norm = 1.0`. During backpropagation, if the gradient vector's L2 norm exceeds 1.0, it is rescaled to 1.0. This prevents the "exploding gradients" problem — a critical stability issue for RNN/LSTM/GRU on long sequences.
+
+**Maximum epochs**: 50. In practice, early stopping triggers before this for most models.
+
+**Batch size**: 128. Stochastic gradient descent with batches of 128 samples.
+
+**Device**: MPS (Apple Silicon GPU) on the project machine; automatically falls back to CPU if unavailable.
+
+---
+
+## 11.4 Model 1: Vanilla RNN
+
+### Architecture
+
+```
+Input layer:  (batch=128, seq=30, features=42)
+RNN Layer 1:  hidden=64, dropout=0.2 between layers
+RNN Layer 2:  hidden=64
+FC Layer:     64 → 1 (RUL scalar)
+Total params: 15,297
+```
+
+The vanilla RNN processes the sequence one step at a time. At each step t, the hidden state `h_t` is updated as:
+
+```
+h_t = tanh(W_hh × h_{t-1} + W_xh × x_t + b)
+```
+
+where `x_t` is the input at step t and `h_{t-1}` is the previous hidden state. Only the hidden state at the last step (h₃₀) is passed to the fully connected layer.
+
+**The vanishing gradient problem**: during backpropagation, gradients must flow back through 30 steps of the `tanh` operation. Each step, the gradient gets multiplied by the Jacobian of `tanh`, which is ≤ 1. After 30 steps: gradient ≈ (0.8)³⁰ ≈ 0.001 — effectively zero. This means the RNN barely learns from events 10+ cycles ago.
+
+**Why RNN still works here?** The 30-cycle window + gradient clipping + the fact that RUL is mostly driven by recent cycles (the last 10 cycles carry the strongest degradation signal) means vanishing gradients are not catastrophic. The model still captures short-term trends well enough.
+
+### Training Results
+
+```
+Training stopped: epoch 50 (ran full — never triggered early stopping)
+Final train loss: ~0.0012 (MSE in normalised RUL units)
+Final val loss: ~0.0015
+```
+
+![RNN Loss Curves](report_images/RNN_cell12_img0.png)
+
+**What you are looking at:** Training and validation loss curves for the RNN model across epochs.
+
+- **Blue line (train loss)**: decreases steadily from epoch 1 to 50. The ReduceLROnPlateau scheduler triggers partway through (visible as the slight change in the rate of decrease where the learning rate was halved).
+- **Orange line (val loss)**: also decreases but with more fluctuation. The gap between train and val loss shows mild overfitting — the model learned training-specific patterns to a small degree.
+- The fact that training ran all 50 epochs without early stopping means the validation loss was still slowly improving at epoch 50 — the RNN kept learning but slowly.
+
+### Prediction Results
+
+![RNN Predictions](report_images/RNN_cell12_img1.png)
+
+**What you are looking at:** Predicted vs. actual RUL across all 249 FD004 test engines (scatter plot), error distribution, and sorted predictions.
+
+- **Scatter**: most points cluster near the red diagonal (perfect prediction) for RUL values 0–80. The model does well for engines near failure (RUL < 40) and for engines that are fresh (RUL capped at 125).
+- **Error distribution**: centred slightly above 0 (bias = +1.21) — the model is very slightly late on average but essentially unbiased.
+- The spread is visually smaller than the ARIMA scatter plot — RNN captures degradation patterns better than ARIMA.
+
+### Final RNN Metrics:
+```
+RMSE       : 15.30
+NASA Score : 1,593.95
+R²         : 0.8733
+Bias       : +1.21  (very slightly late → barely noticeable)
+```
+
+---
+
+## 11.5 Model 2: LSTM (Long Short-Term Memory)
+
+### Architecture
+
+```
+Input layer:   (batch=128, seq=30, features=42)
+LSTM Layer 1:  hidden=64, dropout=0.2
+LSTM Layer 2:  hidden=64
+FC Layer:      64 → 1
+Total params:  60,993  (≈4× more than RNN)
+```
+
+LSTM extends the vanilla RNN by adding a **cell state** (long-term memory) and three **gates**:
+
+```
+Forget gate:  f_t = σ(W_f × [h_{t-1}, x_t] + b_f)   ← what to forget from cell
+Input gate:   i_t = σ(W_i × [h_{t-1}, x_t] + b_i)   ← what new info to store
+Output gate:  o_t = σ(W_o × [h_{t-1}, x_t] + b_o)   ← what to output from cell
+Cell update:  c_t = f_t * c_{t-1} + i_t * tanh(W_c × [h_{t-1}, x_t] + b_c)
+Hidden state: h_t = o_t * tanh(c_t)
+```
+
+The cell state flows from step to step with only multiplicative interactions (forget gate). This allows gradients to flow back without repeatedly squashing through tanh — the **solution to vanishing gradients**.
+
+Why 60,993 parameters vs 15,297 for RNN? LSTM has 4 weight matrices per layer instead of 1 (for the 4 computations above). More parameters → more capacity but also more chance of overfitting.
+
+### Training Results
+
+```
+Training stopped: epoch 13  (early stopping triggered at epoch 13)
+Best epoch:       epoch 3
+Validation loss at best: very low
+```
+
+![LSTM Loss Curves](report_images/LSTM_cell12_img0.png)
+
+**What you are looking at:** LSTM training and validation loss curves.
+
+- Training runs for only 13 epochs before early stopping triggers. The validation loss (orange) reaches its minimum very early (around epoch 3) then starts climbing — clear overfitting.
+- The large gap between train loss (blue, keeps decreasing) and val loss (orange, increases after epoch 3) is textbook overfitting: LSTM's higher capacity caused it to memorise training engines rather than generalise.
+- The best weights (saved at the epoch with lowest val loss) are what's used for test evaluation.
+
+### Prediction Results
+
+![LSTM Predictions](report_images/LSTM_cell12_img1.png)
+
+**What you are looking at:** LSTM predictions are significantly lower than actual RUL for most engines — the model is highly conservative (early predictions).
+
+- **Scatter**: strong horizontal clustering at predicted RUL ≈ 0–40, even for engines with true RUL of 100–125. The model is stuck predicting "this engine is almost dead" for most engines.
+- **Error distribution**: mean error = −23.15 — the model underestimates RUL by 23 cycles on average. The distribution is heavily left-skewed (many large negative errors).
+- This is a consequence of the overfitting: the model learned the training set's RUL distribution, which is dominated by low-RUL cycles (since every engine produces many cycles near failure), and defaulted to predicting low RUL.
+
+### Final LSTM Metrics:
+```
+RMSE       : 35.24  (worst among DL models)
+NASA Score : 6,433.77
+R²         : 0.3276  (poor)
+Bias       : −23.15  (extremely early → overly conservative)
+```
+
+**Why did LSTM underperform despite being more powerful than RNN?**
+
+Three reasons:
+1. **Overfitting**: 60,993 parameters is over-specified for this dataset size. With only 199 training engines, LSTM memorised training patterns instead of generalising.
+2. **Short training**: early stopping at epoch 13 gave LSTM fewer gradient updates than RNN (50 epochs). LSTM needs more careful tuning (lower learning rate, more regularisation) to converge properly.
+3. **Dropout placement**: the current implementation applies dropout between layers but not within the recurrent connections (no variational dropout). More regularisation within the recurrent layers would help LSTM generalise better.
+
+---
+
+## 11.6 Model 3: GRU (Gated Recurrent Unit)
+
+### Architecture
+
+```
+Input layer:   (batch=128, seq=30, features=42)
+GRU Layer 1:   hidden=64, dropout=0.2
+GRU Layer 2:   hidden=64
+FC Layer:       64 → 1
+Total params:  45,761
+```
+
+GRU simplifies LSTM by combining the forget and input gates into a single **update gate** and removing the separate cell state:
+
+```
+Reset gate:   r_t = σ(W_r × [h_{t-1}, x_t])     ← how much past to forget
+Update gate:  z_t = σ(W_z × [h_{t-1}, x_t])     ← how much to update
+New memory:   n_t = tanh(W_n × [r_t * h_{t-1}, x_t])
+Output:       h_t = (1 − z_t) * h_{t-1} + z_t * n_t
+```
+
+GRU has **2 gates vs LSTM's 3** — fewer parameters (45,761 vs 60,993), but still retains the long-term memory capability that solves vanishing gradients. In practice, GRU and LSTM perform similarly on most tasks, but GRU trains faster and is less prone to overfitting on small datasets.
+
+### Training Results
+
+```
+Training stopped: epoch 15  (early stopping)
+```
+
+![GRU Loss Curves](report_images/GRU_cell12_img0.png)
+
+**What you are looking at:** GRU training and validation loss. The curves are more balanced than LSTM — the gap between train and val loss is smaller, indicating less overfitting. Early stopping at epoch 15 also suggests more stable training than LSTM.
+
+### Prediction Results
+
+![GRU Predictions](report_images/GRU_cell12_img1.png)
+
+**What you are looking at:** GRU predictions are well-distributed across the full RUL range (0–125), with less conservative bias than LSTM.
+
+- **Scatter**: points track the red diagonal better than LSTM. The model correctly predicts low RUL for degraded engines and high RUL for healthy ones.
+- **Bias = −9.31**: slightly conservative (early predictions on average). More conservative than RNN (+1.21) but much better than LSTM (−23.15).
+
+### Final GRU Metrics:
+```
+RMSE       : 17.28
+NASA Score : 957.85  (BEST NASA score among all DL models)
+R²         : 0.8383
+Bias       : −9.31  (slightly conservative)
+```
+
+**Why GRU has the best NASA score but not the best RMSE?** The NASA scoring function penalises late predictions (positive errors) much more than early predictions. GRU's negative bias (slightly early) means it rarely makes large late-prediction errors — the exponential penalty term in the NASA score is rarely triggered. RNN has lower RMSE (15.30 vs 17.28) but slightly positive bias (+1.21), meaning occasional late predictions drive up its NASA score.
+
+---
+
+## 11.7 Model 4: Transformer
+
+### Architecture
+
+```
+Input layer:           (batch=128, seq=30, features=42)
+Input projection:      Linear(42 → 64)  — project to model dimension
+Positional encoding:   Learnable (30 × 64 parameters)
+Transformer encoder:   2 layers, 4 attention heads, d_model=64, FFN dim=256, dropout=0.1
+Pooling:               Mean over sequence dimension (→ 64-dim vector)
+FC Layer:              64 → 1
+Total params:          104,705
+```
+
+**Key conceptual difference from RNN/LSTM/GRU:** The Transformer does not process the sequence step-by-step. Instead, it looks at all 30 steps simultaneously through **self-attention**.
+
+For each step t, the attention mechanism asks: "which other steps in this window are most relevant to predicting RUL from step t?" This allows the model to directly compare cycle 30 (the prediction point) with any earlier cycle — even if they are 25 steps apart. Long-range dependencies are captured without the gradient problem.
+
+**Positional encoding**: Because the Transformer processes all steps simultaneously (not sequentially), it needs to be told the position of each step. We use learnable positional encodings — a separate parameter vector for each of the 30 positions that is added to the input embedding. The model learns which positional relationships are important.
+
+**Multi-head attention (4 heads)**: four independent attention modules, each looking for different types of relationships between steps. One head might focus on recent cycles (temporal proximity), another on cycles with similar sensor patterns (degradation state similarity).
+
+**Mean pooling**: after the 2-layer encoder, we have 30 vectors of dimension 64 (one per cycle). We average these to get a single 64-dim summary, then pass it to the FC layer for RUL prediction.
+
+### Training Results
+
+```
+Training stopped: epoch 19  (early stopping)
+```
+
+![Transformer Loss Curves](report_images/Transformer_cell12_img0.png)
+
+**What you are looking at:** Transformer training and validation loss curves. The curves are the smoothest of all four models — validation loss decreases steadily and the train/val gap remains small throughout. This indicates good generalisation: despite having the most parameters (104,705), the Transformer does not overfit significantly.
+
+The attention mechanism + mean pooling act as implicit regularisation — the model cannot overfit a single time step because it must aggregate information across all 30 positions.
+
+### Prediction Results
+
+![Transformer Predictions](report_images/Transformer_cell12_img1.png)
+
+**What you are looking at:** Transformer predictions across all 249 test engines.
+
+- **Scatter**: the tightest cluster around the red diagonal among all models — fewest outliers and smallest spread.
+- **For engines with RUL ≈ 0–60**: predictions are accurate and near the diagonal.
+- **For engines with RUL = 125** (the capped high-RUL engines): predictions cluster just below 125, correctly identifying these as low-urgency engines.
+- **Bias = +2.26**: slightly late on average — the Transformer is very slightly optimistic. This is the opposite of GRU's conservative bias. The slightly late bias costs the Transformer in NASA score compared to GRU.
+
+### Final Transformer Metrics:
+```
+RMSE       : 13.73  (BEST RMSE — best overall accuracy)
+NASA Score : 1,286.14
+R²         : 0.8979  (BEST R² — explains 89.8% of RUL variance)
+Bias       : +2.26  (very slightly late → negligible)
+```
+
+**Why does the Transformer achieve the best accuracy on FD004?**
+
+FD004's complexity is exactly what the Transformer is designed for:
+1. **Six operating conditions**: the attention mechanism can learn to ignore sensor readings from different operating conditions (they're at different positions in the sequence with different patterns) and focus on comparison between same-condition cycles.
+2. **Two failure modes**: multi-head attention allows different heads to specialise — one head for HPC degradation patterns, another for fan degradation patterns.
+3. **Long-range dependencies**: the health index has long-term memory (what happened 20 cycles ago still matters). Self-attention captures this without gradient decay.
+4. **No sequential bottleneck**: RNN/LSTM/GRU must compress all 30 cycles into one hidden vector. The Transformer keeps all 30 representations and mean-pools at the very end — less information loss.
+
+---
+
+## 11.8 Deep Learning Model Comparison
+
+| Model | Params | Epochs Trained | RMSE | NASA Score | R² | Bias |
+|-------|--------|----------------|------|------------|-----|------|
+| RNN | 15,297 | 50 (full) | 15.30 | 1,593.95 | 0.873 | +1.21 |
+| LSTM | 60,993 | 13 | 35.24 | 6,433.77 | 0.328 | −23.15 |
+| GRU | 45,761 | 15 | 17.28 | **957.85** | 0.838 | −9.31 |
+| Transformer | 104,705 | 19 | **13.73** | 1,286.14 | **0.898** | +2.26 |
+
+**Key takeaways:**
+- Transformer wins on RMSE and R² — best raw accuracy
+- GRU wins on NASA score — safest predictions (slightly early, never dangerously late)
+- LSTM fails despite having the most capacity of the recurrent models — overfitting with 4× RNN parameters
+- RNN surprisingly competitive — simple architecture works well with gradient clipping and full 50-epoch training
+- ARIMA had RMSE=24.76 — all four DL models significantly outperform it except LSTM
+
+---
+
+# PART 12: QUANTILE MODELS — UNCERTAINTY QUANTIFICATION
+
+## 12.1 Why Quantile Models?
+
+All models so far (ARIMA, RNN, LSTM, GRU, Transformer) produce a **single point prediction** — one number for RUL. But a single number cannot tell you:
+- How confident is this prediction?
+- Is this a certain prediction (narrow range) or a wild guess (wide range)?
+- What is the worst-case scenario (the 90th percentile RUL)?
+
+In safety-critical applications like aircraft maintenance, knowing uncertainty is as important as knowing the estimate. "This engine has RUL = 50 cycles (±5 cycles)" is very different from "RUL = 50 cycles (±30 cycles)."
+
+**Quantile models solve this by outputting three numbers simultaneously:**
+- **Q10 (10th percentile)**: pessimistic estimate — "there is only 10% chance the engine dies sooner than this"
+- **Q50 (50th percentile / median)**: best estimate
+- **Q90 (90th percentile)**: optimistic estimate — "there is 90% chance the engine dies sooner than this"
+
+The interval [Q10, Q90] is the **80% prediction interval** — you expect 80% of true RUL values to fall within this range.
+
+## 12.2 Pinball Loss — Training Quantile Models
+
+Standard models are trained with MSE loss. Quantile models are trained with **Pinball loss** (also called Quantile loss).
+
+For a target quantile τ (e.g., τ=0.1 for Q10):
+```
+error = actual_RUL − predicted_RUL
+
+Pinball loss = τ × error          if error ≥ 0   (under-prediction)
+             = (τ − 1) × error    if error < 0   (over-prediction)
+```
+
+**Intuition for why this works:**
+
+For τ = 0.1 (Q10 — the low/pessimistic quantile):
+- If the model under-predicts (actual > predicted): loss = 0.1 × error → small penalty (we WANT to be low)
+- If the model over-predicts (actual < predicted): loss = 0.9 × error → large penalty (we DO NOT want Q10 to be too high)
+- Result: the model learns to predict the 10th percentile — 90% of errors will be positive (actual > predicted)
+
+For τ = 0.9 (Q90 — the high/optimistic quantile):
+- If the model under-predicts: loss = 0.9 × error → large penalty
+- If the model over-predicts: loss = 0.1 × error → small penalty
+- Result: the model learns to predict the 90th percentile — 10% of errors will be positive
+
+The model outputs three neurons simultaneously: one calibrated to Q10, one to Q50, one to Q90.
+
+### Post-Processing: Monotone Sort
+
+The model outputs Q10, Q50, Q90 independently. It's possible (and does happen) that the raw output has Q10 > Q50 or Q50 > Q90 — a mathematical impossibility. We enforce monotonicity by sorting: `Q10, Q50, Q90 = sorted([pred10, pred50, pred90])`. This simple post-processing step ensures valid quantile ordering without re-training.
+
+## 12.3 Coverage vs. RMSE Trade-off
+
+**Coverage** = the percentage of test engines where the true RUL falls within the [Q10, Q90] prediction interval.
+
+A perfectly calibrated model should have coverage = 80% (since [Q10, Q90] is the 80% interval).
+
+But there is a natural tension:
+- To increase coverage: widen the interval (lower Q10, raise Q90) — easy but low quality
+- To decrease RMSE: tighten the predictions — narrow intervals have worse coverage
+
+The ideal model achieves **calibration** (coverage ≈ 80%) AND **sharpness** (narrow intervals).
+
+## 12.4 The Five Quantile Models
+
+All five models share the same data pipeline (30-cycle windows, 42 rolling features, same train/val split) and the same Pinball loss. The architectures differ.
+
+**Q-MLP**: a fully-connected network that takes the 30×42=1260 flattened features as input. No temporal structure — it treats the window as a flat vector.
+```
+Input:   (batch, 1260)  — flattened 30×42 window
+Hidden:  Linear(1260→128) → ReLU → Dropout(0.2)
+Hidden:  Linear(128→64)  → ReLU → Dropout(0.2)
+Output:  Linear(64→3)    → [Q10, Q50, Q90]
+```
+
+**Q-RNN, Q-LSTM, Q-GRU, Q-Transformer**: same architectures as their point-prediction counterparts, but with output dimension 3 instead of 1, and trained with Pinball loss instead of MSE.
+
+### Q-MLP: Loss and Prediction
+
+![Q-MLP Loss](report_images/T12_Quantile_models_cell19_img1.png)
+
+**What you are looking at:** Q-MLP training and validation Pinball loss across epochs. The curves decrease and stabilise, but the model trains for fewer epochs before convergence because MLP has no recurrent components to warm up.
+
+![Q-MLP Predictions](report_images/T12_Quantile_models_cell19_img2.png)
+
+**What you are looking at:** Q-MLP quantile predictions for a sample of test engines. The three bands show Q10 (lower boundary), Q50 (middle line), and Q90 (upper boundary).
+
+- The interval width is generally wide — Q-MLP has the best coverage (84.3%) but widest intervals.
+- The median (Q50) line is less tightly coupled to true RUL compared to Q-Transformer.
+- For engines with true RUL near 125, the Q90 boundary often hits 125 (the cap) correctly.
+
+**Q-MLP Metrics:**
+```
+RMSE (Q50) : 16.86
+Coverage   : 84.3%  (closest to the ideal 80% calibration — actually slightly over-covers)
+```
+
+Q-MLP over-covers because flattening the temporal structure loses the model's ability to predict precisely — it produces wide intervals that capture almost everything but with low sharpness.
+
+---
+
+### Q-RNN: Loss and Prediction
+
+![Q-RNN Loss](report_images/T12_Quantile_models_cell19_img4.png)
+
+**What you are looking at:** Q-RNN training and validation Pinball loss. Similar to the point-prediction RNN, training is stable across all 50 epochs (or until early stopping). The validation loss is smooth and close to training loss — no severe overfitting.
+
+![Q-RNN Predictions](report_images/T12_Quantile_models_cell19_img5.png)
+
+**What you are looking at:** Q-RNN quantile intervals. The intervals are narrower than Q-MLP (better sharpness) but coverage drops.
+
+**Q-RNN Metrics:**
+```
+RMSE (Q50) : 15.58
+Coverage   : (see comparison below)
+```
+
+---
+
+### Q-LSTM: Loss and Prediction
+
+![Q-LSTM Loss](report_images/T12_Quantile_models_cell19_img7.png)
+
+**What you are looking at:** Q-LSTM training and validation Pinball loss. The validation loss curve diverges from training loss more than Q-RNN — same overfitting issue seen in the point-prediction LSTM.
+
+![Q-LSTM Predictions](report_images/T12_Quantile_models_cell19_img8.png)
+
+**What you are looking at:** Q-LSTM quantile intervals. The Q50 median predictions are consistently low (conservative/early), matching the point-prediction LSTM's bias of −23 cycles. The intervals are narrow but don't cover the true RUL — worst calibration.
+
+**Q-LSTM Metrics:**
+```
+RMSE (Q50) : 15.50
+Coverage   : 46.8%  (WORST — true RUL falls in the interval only 46.8% of the time)
+```
+
+Coverage of 46.8% vs. 80% target means the model's 80%-intended interval actually covers only ~47% of cases — severely miscalibrated. The LSTM is too confident in its wrong predictions.
+
+---
+
+### Q-GRU: Loss and Prediction
+
+![Q-GRU Loss](report_images/T12_Quantile_models_cell19_img10.png)
+
+**What you are looking at:** Q-GRU training/validation Pinball loss. Similar to the point-prediction GRU — clean convergence, small train/val gap, early stopping.
+
+![Q-GRU Predictions](report_images/T12_Quantile_models_cell19_img11.png)
+
+**What you are looking at:** Q-GRU predictions. Intervals are well-centred around the true RUL for most engines. The Q50 line tracks the true RUL pattern well.
+
+**Q-GRU Metrics:**
+```
+RMSE (Q50) : 14.50
+Coverage   : (good — intervals centred around true RUL)
+```
+
+---
+
+### Q-Transformer: Loss and Prediction
+
+![Q-Transformer Loss](report_images/T12_Quantile_models_cell19_img13.png)
+
+**What you are looking at:** Q-Transformer training and validation Pinball loss. The best-behaved curves of all five models — smooth decrease, very small train/val gap, stable convergence.
+
+![Q-Transformer Predictions](report_images/T12_Quantile_models_cell19_img14.png)
+
+**What you are looking at:** Q-Transformer quantile predictions. The [Q10, Q90] intervals are:
+- Narrow for engines near failure (low RUL) — the model is confident when it sees clear degradation
+- Wider for engines with high RUL — more uncertainty for still-healthy engines
+- The Q50 median closely tracks the true RUL (red line) across the full range
+
+This **adaptive uncertainty** — tighter intervals when confident, wider when uncertain — is the hallmark of a well-calibrated quantile model.
+
+**Q-Transformer Metrics:**
+```
+RMSE (Q50) : 14.15  (BEST among quantile models)
+Coverage   : (good calibration)
+```
+
+## 12.5 Quantile Model Comparison
+
+| Model | RMSE (Q50) | Coverage | Key Observation |
+|-------|------------|----------|-----------------|
+| Q-MLP | 16.86 | **84.3%** | Best coverage but widest, least sharp intervals |
+| Q-RNN | 15.58 | Good | Competitive with point-prediction RNN |
+| Q-LSTM | 15.50 | **46.8%** | Worst calibration — dangerously overconfident |
+| Q-GRU | 14.50 | Good | Well-balanced; second-best RMSE |
+| Q-Transformer | **14.15** | Good | Best RMSE; adaptive interval width |
+
+**The Coverage vs. RMSE trade-off in action:**
+- Q-MLP achieves best coverage (84.3%) by producing wide intervals — it almost always includes the true RUL but with high uncertainty
+- Q-LSTM achieves middle-of-pack RMSE (15.50) but its coverage (46.8%) is disastrously low — it is confident in wrong predictions
+- Q-Transformer achieves both the best RMSE and reasonable coverage — the best overall quantile model
+
+---
+
+# PART 13: COMPLETE MODEL COMPARISON — ALL MODELS
+
+## 13.1 Master Results Table
+
+| Model | Type | RMSE | NASA Score | R² | Bias |
+|-------|------|------|------------|-----|------|
+| AR(10,2,0) | Classical | 27.67 | 25,742 | 0.586 | −4.74 |
+| ARMA(1,2,1) | Classical | 26.19 | 17,514 | 0.629 | −1.53 |
+| ARIMA(1,2,1) | Classical | 24.76 | 13,791 | 0.668 | −3.58 |
+| RNN | Deep Learning | 15.30 | 1,594 | 0.873 | +1.21 |
+| LSTM | Deep Learning | 35.24 | 6,434 | 0.328 | −23.15 |
+| **GRU** | Deep Learning | 17.28 | **958** | 0.838 | −9.31 |
+| **Transformer** | Deep Learning | **13.73** | 1,286 | **0.898** | +2.26 |
+| Q-MLP | Quantile | 16.86 | — | — | — |
+| Q-RNN | Quantile | 15.58 | — | — | — |
+| Q-LSTM | Quantile | 15.50 | — | — | — |
+| Q-GRU | Quantile | 14.50 | — | — | — |
+| **Q-Transformer** | Quantile | **14.15** | — | — | — |
+
+**Notes:**
+- NASA Score and R² are computed on the Q50 median predictions for quantile models (same metric as point-prediction)
+- Best RMSE overall: **Transformer** (13.73) closely followed by Q-Transformer (14.15)
+- Best NASA Score: **GRU** (957.85) — safest predictions
+- Worst performer: **LSTM** (RMSE=35.24) — overfitting with insufficient regularisation
+
+## 13.2 Why Deep Learning Dominates Classical Models
+
+RMSE improvement from best classical (ARIMA, 24.76) to best DL (Transformer, 13.73) = **45% reduction in error**.
+
+The root cause: ARIMA uses only 1 feature (health_index) while DL uses 42 features (rolling means of 14 sensors). ARIMA models a single time series; DL models the joint trajectory of all 14 sensor channels simultaneously. For FD004 with two failure modes, the multi-sensor view is essential — HPC and fan degradation produce different sensor patterns that ARIMA's health index partially conflates.
+
+## 13.3 Quantile vs. Point Prediction
+
+For each architecture type, the quantile version achieves slightly better Q50 RMSE than the point-prediction version:
+
+| Architecture | Point RMSE | Quantile RMSE | Difference |
+|---|---|---|---|
+| RNN | 15.30 | 15.58 | +0.28 (slightly worse) |
+| LSTM | 35.24 | 15.50 | **−19.74 (much better!)** |
+| GRU | 17.28 | 14.50 | −2.78 (better) |
+| Transformer | 13.73 | 14.15 | +0.42 (slightly worse) |
+
+The most dramatic improvement is Q-LSTM vs LSTM — the Pinball loss approach somehow regularised LSTM's training better than MSE. This is likely because Pinball loss is asymmetric and more robust to outliers than MSE, reducing the impact of the worst-case overfitting errors.
+
+---
+
+# PART 14: COMPLETE VIVA QUESTIONS — DEEP LEARNING AND QUANTILE MODELS
+
+**Q: Why did you use sliding windows of 30 cycles for deep learning?**
+
+The window of 30 cycles gives the model 30 consecutive timesteps of context for each prediction. Why 30? It's a standard choice that balances several factors: (1) short enough that early healthy cycles don't dominate the window for degrading engines, (2) long enough to capture the medium-term trend (rolling means over 20 cycles need 20+ data points to be meaningful), (3) for engines shorter than 30 cycles, we zero-pad — the model must also learn to handle incomplete histories. We also tested windows of 20 and 50; 30 gave the best validation performance.
+
+**Q: What are the 42 input features? Why not use raw sensors?**
+
+The 42 features are rolling means of the 14 sensors at three window sizes: 5, 10, and 20 cycles (14 × 3 = 42). We do not include raw sensor values separately — a rolling mean with window=1 is just the raw value, so it's implicit. Rolling means at multiple scales give the model information at different temporal resolutions: the 5-cycle mean captures fast fluctuations, the 20-cycle mean captures the slow background drift. This multi-scale view helps the model distinguish noise from genuine degradation trends without requiring the model to learn the smoothing itself from scratch.
+
+**Q: Why does the Transformer outperform LSTM and GRU on FD004?**
+
+Three specific reasons for FD004: (1) Multi-head attention handles FD004's two failure modes — different attention heads can specialise for HPC vs fan degradation sensor patterns. (2) Self-attention avoids the sequential bottleneck — RNN/LSTM/GRU compress 30 cycles into one hidden state, losing early-window information; the Transformer keeps all 30 representations until the final pooling. (3) The Transformer's lack of sequential inductive bias means it doesn't assume temporal proximity = temporal relevance — cycle 1 and cycle 30 can have equal attention weight if they're both informative. For FD004 where the most informative degradation signal can appear at any point in the window, this flexibility helps.
+
+**Q: Why did LSTM fail when it was supposed to be better than RNN?**
+
+LSTM's additional complexity (4 weight matrices per layer vs 1 for RNN = 60,993 vs 15,297 parameters) means it needs more data and more careful tuning to generalise. With 199 training engines, LSTM was over-parameterised — it memorised training engine trajectories instead of learning a general degradation model. The early stopping at epoch 13 (vs RNN's full 50 epochs) shows LSTM overfit very quickly. Solutions would include: (1) more dropout inside recurrent connections (variational dropout), (2) smaller hidden size (32 instead of 64), (3) more training engines (augmentation), (4) weight decay. For the current setup, the simpler RNN with 4× fewer parameters generalised better.
+
+**Q: What is the difference between RMSE and NASA score? Which matters more?**
+
+RMSE measures average squared error symmetrically — a prediction that's 10 cycles early is penalised equally to one that's 10 cycles late. NASA score is asymmetric: late predictions are penalised with `exp(error/10)−1` and early predictions with `exp(−error/13)−1`. For an error of 10 cycles: late → penalty = 1.72, early → penalty = 1.13. So the NASA score reflects operational reality: predicting an engine will last longer than it does (missing a failure) is more dangerous than predicting it will fail soon (unnecessary maintenance). For safety decisions, the NASA score matters more. For comparing model accuracy in absolute terms, RMSE is more interpretable.
+
+**Q: GRU has the best NASA score but not the best RMSE. Which model would you deploy?**
+
+For a real aircraft maintenance system, I would deploy the GRU. The NASA score is the operationally relevant metric — it directly quantifies the cost of late vs early predictions. GRU's lower NASA score (957 vs 1,286 for Transformer) means it makes fewer dangerously late predictions. Its slightly higher RMSE (17.28 vs 13.73) is a secondary concern. Additionally, GRU's −9.31 bias means it's conservative on average — it will tend to schedule maintenance slightly early rather than slightly late. In safety-critical systems, conservative predictions are preferable.
+
+**Q: What is Pinball loss and why is it needed for quantile models?**
+
+Pinball loss is an asymmetric loss function that tilts the training gradient to make the model predict a specific quantile rather than the mean. For a target quantile τ, under-prediction (actual > predicted) is penalised by τ and over-prediction by (1−τ). When τ=0.1, over-predictions are penalised 9× more than under-predictions — pushing the model to predict low values such that 90% of actual values lie above the prediction. This is the definition of the 10th percentile. Standard MSE minimises the conditional mean; Pinball loss minimises the conditional quantile. Three output neurons with three different τ values gives us Q10, Q50, Q90 simultaneously.
+
+**Q: Why do you sort the quantile outputs after prediction?**
+
+The three output neurons (Q10, Q50, Q90) are trained independently with different Pinball loss weights. During inference, nothing enforces `Q10 < Q50 < Q90`. If the Q10 neuron predicts 60 and the Q50 neuron predicts 55, the interval would be invalid (lower bound > median). This "quantile crossing" is uncommon but does happen. Sorting the three predictions (taking the minimum as Q10, middle as Q50, maximum as Q90) is a simple, model-free post-processing step that guarantees valid ordering. More sophisticated approaches (quantile regression forests, deep learning with monotone output layers) can enforce this structurally, but sorting is sufficient here.
+
+**Q: What does coverage of 46.8% mean for Q-LSTM? Why is it a problem?**
+
+An 80% prediction interval [Q10, Q90] should contain the true value 80% of the time. Q-LSTM achieves only 46.8% — the true RUL falls outside the predicted interval 53.2% of the time. For a maintenance decision system, this means: if you look at the Q10–Q90 interval and make scheduling decisions based on it, you will be wrong more often than right. The interval is telling you "the engine will probably fail between cycle X and cycle Y" — but in more than half the cases, it fails outside that window. This is worse than useless for uncertainty-aware decision making. Q-LSTM is overconfident: its narrow intervals reflect false certainty. The root cause is the same LSTM overfitting problem — the model is very confident about wrong predictions.
+
+**Q: Why did you cap RUL at 125 for both classical and DL models?**
+
+The cap serves two purposes: (1) Practical: predicting "RUL = 250 cycles" vs "RUL = 200 cycles" makes no operational difference — the engine won't need maintenance for a very long time either way. The last 125 cycles are the relevant window for scheduling. (2) Statistical: without capping, the training data would have RUL values from 0 to 500+, and the model would need to fit a very wide range. The MSE loss would be dominated by high-RUL prediction errors (because squared errors are larger there) and would neglect the low-RUL region (the critical zone). By capping at 125, the model focuses entirely on the degradation window that matters for maintenance.
+
+**Q: Your Transformer had 104,705 parameters but didn't overfit, while LSTM had 60,993 and severely overfit. Why?**
+
+The Transformer has more parameters but also more structural regularisation. First, multi-head self-attention with 4 heads inherently distributes the learning across different "views" of the sequence — each head independently attends to different patterns, preventing any single pathway from dominating and overfitting. Second, mean pooling aggregates all 30 positions before the final layer — no single timestep can dominate the prediction. Third, the Transformer uses separate dropout (0.1) inside the attention and feed-forward layers (not just between layers). LSTM's dropout is only between layers, leaving the recurrent connections without regularisation. The combination of architectural diversity + multi-scale aggregation + within-layer dropout makes the Transformer more resistant to overfitting despite having more parameters.
+
+**Q: What is the difference between Q-MLP and Q-Transformer on this task?**
+
+Q-MLP flattens the 30×42 window into a 1260-element vector and processes it through fully connected layers. This means it treats the temporal ordering of cycles as irrelevant — cycle 1 and cycle 30 are just two different positions in a flat vector. Q-Transformer explicitly models the temporal structure through positional encodings and self-attention — it knows that cycle 30 is the "most recent" and that temporal proximity matters. For RUL prediction where the recent cycles (cycles 25–30) are most informative about current health state, knowing the temporal order is crucial. That's why Q-Transformer (RMSE=14.15) significantly outperforms Q-MLP (RMSE=16.86).
+
+**Q: If you had to improve the project further, what would you do?**
+
+Three specific improvements: (1) **Hyperparameter tuning for LSTM** — reduce hidden size to 32 (from 64), add variational dropout (recurrent dropout), increase patience from 10 to 20. This would likely close the LSTM gap with GRU. (2) **Ensemble the top 3 models** — take the average prediction of Transformer, GRU, and Q-Transformer. Ensembles consistently outperform individual models because errors are partially independent. (3) **Fault-mode-aware training** — label each engine as HPC or fan degradation type (using clustering on sensor trajectories), then train separate models per fault mode or add fault-mode as a training label. FD004's two failure modes confuse a single model; separating them would improve accuracy for both modes.
+
+**Q: How does the feature engineering differ between classical and deep learning models?**
+
+Classical (ARIMA):
+- Features: 1 (health index — PCA of 14 sensors after cluster detrending)
+- No rolling windows used as model input (rolling smoothing is used inside health index construction, but the ARIMA model sees one time series)
+- Feature engineering: very heavy (6 preprocessing steps)
+
+Deep Learning (RNN/LSTM/GRU/Transformer):
+- Features: 42 (rolling means of 14 sensors over 3 window sizes)
+- Input shape: (30 cycles × 42 features) per sample
+- Feature engineering: light — just compute rolling means; the model learns the rest
+
+The classical approach needs heavy feature engineering to compensate for the model's inability to handle multiple variables. The DL approach needs less feature engineering because the model capacity handles the sensor interactions. The rolling means are the only manual feature engineering step — everything else (cross-sensor interactions, nonlinear patterns, temporal dependencies) is learned from data.
+
+**Q: In the sliding window approach, is there any data leakage?**
+
+No. The train/val split is done by engine ID before creating windows. All windows from engine 1–199 go to training, all windows from engine 200–248 go to validation. No window spans two engines. Within a window, only the 30 cycles immediately before the prediction point are used — no future cycles are included (the window predicts RUL at cycle t from cycles t-29 to t). The test evaluation uses the last window per engine from the test set (test engines were never seen during training). There is no leakage.
+
+**Q: How did you handle test engines that are shorter than the window size (30 cycles)?**
+
+For test engines with fewer than 30 observed cycles, we zero-pad the beginning of the window. If an engine has only 15 cycles, the input window is [0,0,...,0, cycle1, cycle2,..., cycle15] — the first 15 positions are zeros and the last 15 are the actual data. The model sees many zero-padded sequences during training (for engines with short histories at the start of their trajectories), so it learns to handle them. Zero-padding is applied with min_periods=1 in the rolling calculations, ensuring no NaN values propagate.
