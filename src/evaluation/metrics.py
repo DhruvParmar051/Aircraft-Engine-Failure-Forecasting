@@ -371,14 +371,16 @@ def interval_coverage_by_rul_bucket(
 # LITERATURE BENCHMARKS — FD004 published results (DOI cited)
 # ══════════════════════════════════════════════════════════════════════════════
 
-# All values from peer-reviewed publications. DOIs are provided for verification.
-# Only FD004 results are listed; RMSE reported in cycles.
-LITERATURE_BENCHMARKS_FD004 = {
-    "DCNN\n(Li et al. 2018)":      {"rmse": 22.36, "doi": "10.1016/j.ress.2018.06.005"},
-    "BLSTM\n(Zhang et al. 2018)":  {"rmse": 23.99, "doi": "10.1016/j.ress.2018.05.001"},
-    "BiLSTM\n(Zhao et al. 2020)":  {"rmse": 18.42, "doi": "arXiv:2002.10338"},
-    "IBTSA\n(Chen et al. 2020)":   {"rmse": 16.14, "doi": "10.1016/j.ress.2020.107197"},
-    "TF-LSTM\n(Song et al. 2022)": {"rmse": 14.86, "doi": "10.1016/j.engappai.2022.104987"},
+# ── PLACEHOLDER — update with verified papers before submission ────────────────
+# Add entries in the format:
+#   "ModelName\n(Author et al. YEAR)": {"rmse": <float>, "doi": "<doi or arXiv>"}
+# Only include papers that:
+#   (a) explicitly report results on NASA CMAPSS FD004
+#   (b) use the same RUL cap (125 cycles) and RMSE metric
+#   (c) are peer-reviewed (journal or major conference)
+LITERATURE_BENCHMARKS_FD004: dict[str, dict] = {
+    # Example (fill in with verified papers):
+    # "Saxena et al. (2008)\n[dataset paper]": {"rmse": None, "doi": "10.1109/MSPEC.2008.4460093"},
 }
 
 

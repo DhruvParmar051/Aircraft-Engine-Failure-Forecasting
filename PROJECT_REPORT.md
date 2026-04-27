@@ -7,15 +7,14 @@
 
 ---
 
-
 ---
 
 ## 1.1 Data Loading
 
 ```
 # T01 — Data Loading
-**Goal:** load all 4 FD subsets, combine into unified DataFrames, save as `train_loaded.csv` / `test_loaded.csv`  
-**Output:** `data/loaded/train_loaded.csv`, `data/loaded/test_loaded.csv`  
+**Goal:** load all 4 FD subsets, combine into unified DataFrames, save as `train_loaded.csv` / `test_loaded.csv`
+**Output:** `data/loaded/train_loaded.csv`, `data/loaded/test_loaded.csv`
 **Next:** T02_rul_computation.ipynb
 ```
 
@@ -31,19 +30,19 @@ Project root: /Users/dhruvparmar/DAU/sem_2/IT_402_Applied_Forecasting_Methods/Pr
 Loading training files...
   train: 249 engines, 61249 rows  [train_FD004.txt]
    engine_id  cycle      op1     op2    op3      s1      s2       s3       s4  \
-0          1      1  42.0049  0.8400  100.0  445.00  549.68  1343.43  1112.93   
-1          1      2  20.0020  0.7002  100.0  491.19  606.07  1477.61  1237.50   
-2          1      3  42.0038  0.8409  100.0  445.00  548.95  1343.12  1117.05   
+0          1      1  42.0049  0.8400  100.0  445.00  549.68  1343.43  1112.93
+1          1      2  20.0020  0.7002  100.0  491.19  606.07  1477.61  1237.50
+2          1      3  42.0038  0.8409  100.0  445.00  548.95  1343.12  1117.05
 
      s5  ...     s12      s13      s14     s15   s16  s17   s18    s19    s20  \
-0  3.91  ...  129.78  2387.99  8074.83  9.3335  0.02  330  2212  100.0  10.62   
-1  9.35  ...  312.59  2387.73  8046.13  9.1913  0.02  361  2324  100.0  24.37   
-2  3.91  ...  129.62  2387.97  8066.62  9.4007  0.02  329  2212  100.0  10.48   
+0  3.91  ...  129.78  2387.99  8074.83  9.3335  0.02  330  2212  100.0  10.62
+1  9.35  ...  312.59  2387.73  8046.13  9.1913  0.02  361  2324  100.0  24.37
+2  3.91  ...  129.62  2387.97  8066.62  9.4007  0.02  329  2212  100.0  10.48
 
-       s21  
-0   6.3670  
-1  14.6552  
-2   6.4213  
+       s21
+0   6.3670
+1  14.6552
+2   6.4213
 
 [3 rows x 26 columns]
 [DataFrame table — see notebook for full HTML]
@@ -57,19 +56,19 @@ Loading training files...
 Loading test files...
   test: 248 engines, 41214 rows  [test_FD004.txt]
    engine_id  cycle      op1    op2    op3      s1      s2       s3       s4  \
-0          1      1  20.0072  0.700  100.0  491.19  606.67  1481.04  1227.81   
-1          1      2  24.9984  0.620   60.0  462.54  536.22  1256.17  1031.48   
-2          1      3  42.0000  0.842  100.0  445.00  549.23  1340.13  1105.88   
+0          1      1  20.0072  0.700  100.0  491.19  606.67  1481.04  1227.81
+1          1      2  24.9984  0.620   60.0  462.54  536.22  1256.17  1031.48
+2          1      3  42.0000  0.842  100.0  445.00  549.23  1340.13  1105.88
 
      s5  ...      s13      s14      s15   s16  s17   s18     s19    s20  \
-0  9.35  ...  2387.78  8048.98   9.2229  0.02  362  2324  100.00  24.31   
-1  7.05  ...  2028.09  7863.46  10.8632  0.02  306  1915   84.93  14.36   
-2  3.91  ...  2387.95  8071.13   9.3960  0.02  328  2212  100.00  10.39   
+0  9.35  ...  2387.78  8048.98   9.2229  0.02  362  2324  100.00  24.31
+1  7.05  ...  2028.09  7863.46  10.8632  0.02  306  1915   84.93  14.36
+2  3.91  ...  2387.95  8071.13   9.3960  0.02  328  2212  100.00  10.39
 
-       s21  rul_last  
-0  14.7007        22  
-1   8.5748        22  
-2   6.4365        22  
+       s21  rul_last
+0  14.7007        22
+1   8.5748        22
+2   6.4365        22
 
 [3 rows x 27 columns]
 [DataFrame table — see notebook for full HTML]
@@ -96,16 +95,15 @@ Saved: /Users/dhruvparmar/DAU/sem_2/IT_402_Applied_Forecasting_Methods/Project/A
 Saved: /Users/dhruvparmar/DAU/sem_2/IT_402_Applied_Forecasting_Methods/Project/Aircraft Engine Failure Forecasting/data/loaded/test_loaded.csv
 ```
 
-
 ---
 
 ## 1.2 RUL Computation
 
 ```
 # T02 — RUL Computation
-**Input:** `data/loaded/train_loaded.csv`, `data/loaded/test_loaded.csv`  
-**Goal:** compute Remaining Useful Life for every row; cap at 125 cycles  
-**Output:** `data/loaded/train_rul.csv`, `data/loaded/test_rul.csv`  
+**Input:** `data/loaded/train_loaded.csv`, `data/loaded/test_loaded.csv`
+**Goal:** compute Remaining Useful Life for every row; cap at 125 cycles
+**Output:** `data/loaded/train_rul.csv`, `data/loaded/test_rul.csv`
 **Next:** T03_feature_engineering.ipynb
 ```
 
@@ -136,7 +134,6 @@ Index(['engine_id', 'cycle', 'op1', 'op2', 'op3', 's1', 's2', 's3', 's4', 's5',
 ## Visualize RUL distributions
 ```
 
-
 ![1.2 RUL Computation](report_images/1_2_rul_computation_001.png)
 
 ```
@@ -160,7 +157,6 @@ Saved: /Users/dhruvparmar/DAU/sem_2/IT_402_Applied_Forecasting_Methods/Project/A
 Saved: /Users/dhruvparmar/DAU/sem_2/IT_402_Applied_Forecasting_Methods/Project/Aircraft Engine Failure Forecasting/data/loaded/test_rul.csv
 ```
 
-
 ---
 
 ## 1.3 Exploratory Data Analysis
@@ -172,19 +168,19 @@ Project root: /Users/dhruvparmar/DAU/sem_2/IT_402_Applied_Forecasting_Methods/Pr
 ```
 Loading training files...
    engine_id  cycle      op1     op2    op3      s1      s2       s3       s4  \
-0          1      1  42.0049  0.8400  100.0  445.00  549.68  1343.43  1112.93   
-1          1      2  20.0020  0.7002  100.0  491.19  606.07  1477.61  1237.50   
-2          1      3  42.0038  0.8409  100.0  445.00  548.95  1343.12  1117.05   
+0          1      1  42.0049  0.8400  100.0  445.00  549.68  1343.43  1112.93
+1          1      2  20.0020  0.7002  100.0  491.19  606.07  1477.61  1237.50
+2          1      3  42.0038  0.8409  100.0  445.00  548.95  1343.12  1117.05
 
      s5  ...      s13      s14     s15   s16  s17   s18    s19    s20  \
-0  3.91  ...  2387.99  8074.83  9.3335  0.02  330  2212  100.0  10.62   
-1  9.35  ...  2387.73  8046.13  9.1913  0.02  361  2324  100.0  24.37   
-2  3.91  ...  2387.97  8066.62  9.4007  0.02  329  2212  100.0  10.48   
+0  3.91  ...  2387.99  8074.83  9.3335  0.02  330  2212  100.0  10.62
+1  9.35  ...  2387.73  8046.13  9.1913  0.02  361  2324  100.0  24.37
+2  3.91  ...  2387.97  8066.62  9.4007  0.02  329  2212  100.0  10.48
 
-       s21  RUL  
-0   6.3670  125  
-1  14.6552  125  
-2   6.4213  125  
+       s21  RUL
+0   6.3670  125
+1  14.6552  125
+2   6.4213  125
 
 [3 rows x 27 columns]
 [DataFrame table — see notebook for full HTML]
@@ -193,19 +189,19 @@ Loading training files...
 ```
 Loading test files...
    engine_id  cycle      op1    op2    op3      s1      s2       s3       s4  \
-0          1      1  20.0072  0.700  100.0  491.19  606.67  1481.04  1227.81   
-1          1      2  24.9984  0.620   60.0  462.54  536.22  1256.17  1031.48   
-2          1      3  42.0000  0.842  100.0  445.00  549.23  1340.13  1105.88   
+0          1      1  20.0072  0.700  100.0  491.19  606.67  1481.04  1227.81
+1          1      2  24.9984  0.620   60.0  462.54  536.22  1256.17  1031.48
+2          1      3  42.0000  0.842  100.0  445.00  549.23  1340.13  1105.88
 
      s5  ...      s13      s14      s15   s16  s17   s18     s19    s20  \
-0  9.35  ...  2387.78  8048.98   9.2229  0.02  362  2324  100.00  24.31   
-1  7.05  ...  2028.09  7863.46  10.8632  0.02  306  1915   84.93  14.36   
-2  3.91  ...  2387.95  8071.13   9.3960  0.02  328  2212  100.00  10.39   
+0  9.35  ...  2387.78  8048.98   9.2229  0.02  362  2324  100.00  24.31
+1  7.05  ...  2028.09  7863.46  10.8632  0.02  306  1915   84.93  14.36
+2  3.91  ...  2387.95  8071.13   9.3960  0.02  328  2212  100.00  10.39
 
-       s21  RUL  
-0  14.7007  125  
-1   8.5748  125  
-2   6.4365  125  
+       s21  RUL
+0  14.7007  125
+1   8.5748  125
+2   6.4365  125
 
 [3 rows x 27 columns]
 [DataFrame table — see notebook for full HTML]
@@ -214,7 +210,6 @@ Loading test files...
 ```
 ## 2 - Engine lifetime distribution
 ```
-
 
 ![1.3 Exploratory Data Analysis](report_images/1_3_exploratory_data_analysis_002.png)
 
@@ -235,7 +230,6 @@ Minimum lifetime (128) > RUL cap (125): True
 ```
 ## 3 - Operating conditions
 ```
-
 
 ![1.3 Exploratory Data Analysis](report_images/1_3_exploratory_data_analysis_003.png)
 
@@ -258,7 +252,6 @@ Long:    Engine 118  (543 cycles)
 ```
 ## 5 - Sensor variance
 ```
-
 
 ![1.3 Exploratory Data Analysis](report_images/1_3_exploratory_data_analysis_004.png)
 
@@ -294,7 +287,6 @@ Borderline sensors (need trajectory + correlation check): ['s16', 's10']
 ## 6 — Correlation with RUL
 ```
 
-
 ![1.3 Exploratory Data Analysis](report_images/1_3_exploratory_data_analysis_005.png)
 
 ```
@@ -325,7 +317,6 @@ dtype: float64
 ```
 ## 7 — Trajectory plots for ALL non-zero sensors
 ```
-
 
 ![1.3 Exploratory Data Analysis](report_images/1_3_exploratory_data_analysis_006.png)
 
@@ -367,9 +358,7 @@ s21      35.553759       -0.000          KEEP
 ## 9 — Average trajectory (nonlinearity evidence)
 ```
 
-
 ![1.3 Exploratory Data Analysis](report_images/1_3_exploratory_data_analysis_007.png)
-
 
 ---
 
@@ -403,15 +392,15 @@ From the official NASA readme.txt — ground truth, not assumed.
 ```
 NASA CMAPSS Dataset Specifications (source: readme.txt)
   Dataset  Train Engines  Test Engines  Operating Conditions  Fault Modes  \
-0   FD001            100           100                     1            1   
-1   FD002            260           259                     6            1   
-2   FD003            100           100                     1            2   
-3   FD004            248           249                     6            2   
+0   FD001            100           100                     1            1
+1   FD002            260           259                     6            1
+2   FD003            100           100                     1            2
+3   FD004            248           249                     6            2
 
-         Condition  
-0   Sea Level only  
-1  Multi-condition  
-2   Sea Level only  
+         Condition
+0   Sea Level only
+1  Multi-condition
+2   Sea Level only
 3  Multi-condition
 [DataFrame table — see notebook for full HTML]
 ```
@@ -422,7 +411,6 @@ NASA CMAPSS Dataset Specifications (source: readme.txt)
 A dataset is more complex if it has more operating conditions AND more fault modes.
 Only FD004 has BOTH maximum conditions and maximum fault modes.
 ```
-
 
 ![1.4 Why FD004? Dataset Selection](report_images/1_4_why_fd004__dataset_selection_008.png)
 
@@ -447,13 +435,11 @@ RUL Statistics by Dataset (from actual data files):
 [DataFrame table — see notebook for full HTML]
 ```
 
-
 ![1.4 Why FD004? Dataset Selection](report_images/1_4_why_fd004__dataset_selection_009.png)
 
 ```
 ## 4. Sensor Variance — Prove FD004 Has Greatest Preprocessing Challenge
 ```
-
 
 ![1.4 Why FD004? Dataset Selection](report_images/1_4_why_fd004__dataset_selection_010.png)
 
@@ -469,7 +455,6 @@ The large gap between overall and within-condition std confirms:
 ## 5. Engine Lifetime Distribution — Confirms Richness of FD004
 ```
 
-
 ![1.4 Why FD004? Dataset Selection](report_images/1_4_why_fd004__dataset_selection_011.png)
 
 ```
@@ -482,19 +467,19 @@ confirming it is the standard multi-condition, multi-fault RUL benchmark in the 
 ```
 Literature using FD004 as primary benchmark (peer-reviewed):
                  Paper       Method  FD004 RMSE  \
-0     Li et al. (2018)         DCNN       22.36   
-1  Zhang et al. (2018)        BLSTM       23.99   
-2   Zhao et al. (2020)       BiLSTM       18.42   
-3   Chen et al. (2020)        IBTSA       16.14   
-4   Song et al. (2022)      TF-LSTM       14.86   
-5            This work  Transformer       12.88   
+0     Li et al. (2018)         DCNN       22.36
+1  Zhang et al. (2018)        BLSTM       23.99
+2   Zhao et al. (2020)       BiLSTM       18.42
+3   Chen et al. (2020)        IBTSA       16.14
+4   Song et al. (2022)      TF-LSTM       14.86
+5            This work  Transformer       12.88
 
-                                    Reason                             DOI  
-0                Multi-condition benchmark      10.1016/j.ress.2018.06.005  
-1               Most complex CMAPSS subset      10.1016/j.ress.2018.05.001  
-2             All 4 subsets, FD004 hardest                arXiv:2002.10338  
-3               Multi-condition evaluation      10.1016/j.ress.2020.107197  
-4                    State-of-art on FD004  10.1016/j.engappai.2022.104987  
+                                    Reason                             DOI
+0                Multi-condition benchmark      10.1016/j.ress.2018.06.005
+1               Most complex CMAPSS subset      10.1016/j.ress.2018.05.001
+2             All 4 subsets, FD004 hardest                arXiv:2002.10338
+3               Multi-condition evaluation      10.1016/j.ress.2020.107197
+4                    State-of-art on FD004  10.1016/j.engappai.2022.104987
 5  Multi-condition + multi-fault challenge                               —
 [DataFrame table — see notebook for full HTML]
 ```
@@ -528,17 +513,16 @@ Conclusion: FD004 was chosen because it is the most complex, most
            realistic, and most widely studied CMAPSS benchmark.
 ```
 
-
 ---
 
 ## 1.5 Feature Engineering & KMeans Validation
 
 ```
 # T03 — Feature Engineering
-**Input:** `data/loaded/train_rul.csv`, `data/loaded/test_rul.csv`  
-**Goal:** drop constant sensors → normalize per (dataset_id, op_cluster) → add rolling features  
-**Output:** `data/processed/train_features.csv`, `data/processed/test_features.csv`  
-**Artifacts:** `artifacts/kmeans_op_clusters.pkl`, `artifacts/scalers.pkl`  
+**Input:** `data/loaded/train_rul.csv`, `data/loaded/test_rul.csv`
+**Goal:** drop constant sensors → normalize per (dataset_id, op_cluster) → add rolling features
+**Output:** `data/processed/train_features.csv`, `data/processed/test_features.csv`
+**Artifacts:** `artifacts/kmeans_op_clusters.pkl`, `artifacts/scalers.pkl`
 **Next:** modeling notebooks (ARIMA, LSTM, TFT, ...)
 ```
 
@@ -557,7 +541,7 @@ train: (61249, 27)  |  test: (41214, 27)
 ```
 ---
 ## Step 1 — Drop low-variance sensors
-detected on train only (never test) — per-dataset_id variance check  
+detected on train only (never test) — per-dataset_id variance check
 a sensor must be flat in ALL subsets to be dropped (not just FD001)
 ```
 
@@ -571,9 +555,9 @@ Sensors kept (20): ['s1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's10',
 ```
 ---
 ## Step 2 — Normalize per (dataset_id, op_cluster) using StandardScaler
-StandardScaler chosen over MinMaxScaler: test values can exceed train extremes  
-as engines degrade — StandardScaler handles this as high z-scores, not out-of-range values  
-KMeans n_clusters adapts automatically 
+StandardScaler chosen over MinMaxScaler: test values can exceed train extremes
+as engines degrade — StandardScaler handles this as high z-scores, not out-of-range values
+KMeans n_clusters adapts automatically
 fitted artifacts saved to `artifacts/` for inference reuse
 ```
 
@@ -605,7 +589,7 @@ op_cluster
 ```
 ---
 ## Step 3 — Rolling features
-input is sorted by (engine_id, cycle) inside add_rolling_features  
+input is sorted by (engine_id, cycle) inside add_rolling_features
 rolling windows never cross engine boundaries
 ```
 
@@ -672,7 +656,6 @@ Loaded train for KMeans analysis: (61249, 27)
 ### 4a. Elbow + Silhouette — Proves k=6 is Optimal (from data)
 ```
 
-
 ![1.5 Feature Engineering & KMeans Validation](report_images/1_5_feature_engineering___kmeans_validat_012.png)
 
 ```
@@ -686,7 +669,6 @@ Loaded train for KMeans analysis: (61249, 27)
 ### 4b. Cluster Formation — 6 Tight Clouds in Op-Condition Space
 ```
 
-
 ![1.5 Feature Engineering & KMeans Validation](report_images/1_5_feature_engineering___kmeans_validat_013.png)
 
 ```
@@ -695,7 +677,7 @@ Loaded train for KMeans analysis: (61249, 27)
 
 Cluster Centroids (mean operating conditions per cluster):
              op1     op2    op3
-cluster                        
+cluster
 0        42.0030  0.8405  100.0
 1        10.0030  0.2505  100.0
 2        25.0031  0.6205   60.0
@@ -718,7 +700,7 @@ Cross-tabulation: Known Operating Regime vs KMeans Cluster Label
 (Each row = one discrete NASA operating condition)
 (Each column = one KMeans cluster)
 cluster             0     1     2     3     4     5
-known_regime                                       
+known_regime
 0.0_0.0_100.0       0     0     0     0  9238     0
 10.0_0.2_100.0      0  4686     0     0     0     0
 10.0_0.3_100.0      0  4538     0     0     0     0
@@ -733,7 +715,6 @@ Conclusion: KMeans is not arbitrary — it recovers the 6 known NASA operating r
 /opt/anaconda3/envs/dl/lib/python3.10/site-packages/sklearn/utils/validation.py:2749: UserWarning: X does not have valid feature names, but KMeans was fitted with feature names
   warnings.warn(
 ```
-
 
 ---
 
@@ -792,7 +773,6 @@ Threshold candidates:
   q=0.70 → threshold=3.363  |  0/248 test engines reach it (0%)
   q=0.90 → threshold=3.707  |  0/248 test engines reach it (0%)
 ```
-
 
 ![2.1 AR Model](report_images/2_1_ar_model_014.png)
 
@@ -907,7 +887,6 @@ engine_id   level_p     diff1_p     rec_d
 ... [177 more lines truncated] ...
 ```
 
-
 ![2.1 AR Model](report_images/2_1_ar_model_015.png)
 
 ```
@@ -925,7 +904,6 @@ d=2 (2 differences needed) : 206 engines
 Book rule: PACF cuts off at lag p → AR order.
 Plot on smoothed health_index (smoothing is applied before fitting in production too).
 ```
-
 
 ![2.1 AR Model](report_images/2_1_ar_model_016.png)
 
@@ -967,15 +945,15 @@ Book rule (CH06/CH07): always run Ljung-Box after fitting. All p-values > 0.05 =
 ```
 
 ```
-                               SARIMAX Results                                
+                               SARIMAX Results
 ==============================================================================
 Dep. Variable:                      y   No. Observations:                  543
 Model:              SARIMAX(10, 2, 0)   Log Likelihood                1468.826
 Date:                Mon, 27 Apr 2026   AIC                          -2915.653
 Time:                        14:36:39   BIC                          -2868.425
 Sample:                             0   HQIC                         -2897.184
-                                - 543                                         
-Covariance Type:                  opg                                         
+                                - 543
+Covariance Type:                  opg
 ==============================================================================
                  coef    std err          z      P>|z|      [0.025      0.975]
 ------------------------------------------------------------------------------
@@ -1020,7 +998,6 @@ Ljung-Box residual test — AR(10)
 
 Book rule: walk-forward validation — refit at each window step, predict out-of-sample.
 ```
-
 
 ![2.1 AR Model](report_images/2_1_ar_model_017.png)
 
@@ -1116,7 +1093,6 @@ Rolling forecast RMSE: 0.0280
 ... [175 more lines truncated] ...
 ```
 
-
 ![2.1 AR Model](report_images/2_1_ar_model_018.png)
 
 ```
@@ -1131,7 +1107,6 @@ Best engine RMSE  : 0.0279
 Worst engine RMSE : 0.0399
 ========================================
 ```
-
 
 ---
 
@@ -1173,7 +1148,6 @@ Threshold candidates:
   q=0.90 → threshold=3.707  |  0/248 test engines reach it (0%)
 ```
 
-
 ![2.2 ARMA Model](report_images/2_2_arma_model_019.png)
 
 ```
@@ -1206,7 +1180,6 @@ d distribution: {2: 9, 1: 1}
 → recommended d = 2  (modal across 10 sampled engines)
 ```
 
-
 ![2.2 ARMA Model](report_images/2_2_arma_model_020.png)
 
 ```
@@ -1223,7 +1196,6 @@ d=2 (2 differences needed) : 9 engines
 
 ACF tail-off + PACF tail-off = ARMA(p,q) signature.
 ```
-
 
 ![2.2 ARMA Model](report_images/2_2_arma_model_021.png)
 
@@ -1262,15 +1234,15 @@ Book sorts all (p,q) combos by AIC ascending. Lowest AIC wins.
 ```
 
 ```
-                               SARIMAX Results                                
+                               SARIMAX Results
 ==============================================================================
 Dep. Variable:                      y   No. Observations:                  543
 Model:               SARIMAX(1, 2, 1)   Log Likelihood                1459.052
 Date:                Mon, 27 Apr 2026   AIC                          -2912.104
 Time:                        14:37:26   BIC                          -2899.223
 Sample:                             0   HQIC                         -2907.067
-                                - 543                                         
-Covariance Type:                  opg                                         
+                                - 543
+Covariance Type:                  opg
 ==============================================================================
                  coef    std err          z      P>|z|      [0.025      0.975]
 ------------------------------------------------------------------------------
@@ -1305,7 +1277,6 @@ Ljung-Box residual test — ARMA(1,1)
 ```
 ## 6. Rolling forecast — walk-forward validation (CH06 pattern)
 ```
-
 
 ![2.2 ARMA Model](report_images/2_2_arma_model_022.png)
 
@@ -1401,7 +1372,6 @@ Rolling forecast RMSE: 0.0273
 ... [175 more lines truncated] ...
 ```
 
-
 ![2.2 ARMA Model](report_images/2_2_arma_model_023.png)
 
 ```
@@ -1416,7 +1386,6 @@ Best engine RMSE  : 0.0267
 Worst engine RMSE : 0.0410
 ========================================
 ```
-
 
 ---
 
@@ -1444,7 +1413,6 @@ Worst engine RMSE : 0.0410
 health_index R2 with RUL (post-monotone): -5.188  (target: > 0.3)
 Failure threshold: 1.6850
 ```
-
 
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_024.png)
 
@@ -1476,7 +1444,6 @@ Threshold candidates:
   q=0.70 → threshold=3.363  |  0/248 test engines reach it (0%)
   q=0.90 → threshold=3.707  |  0/248 test engines reach it (0%)
 ```
-
 
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_025.png)
 
@@ -1538,7 +1505,6 @@ Recommended d      : 2
 After applying d differences, ACF/PACF guides selection of p and q.
 ```
 
-
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_026.png)
 
 ```
@@ -1573,19 +1539,18 @@ Exact copy of CH07 `optimize_ARIMA` function. d is fixed from ADF above.
 CH07 adds QQ plot on top of Ljung-Box (CH06 had only Ljung-Box).
 ```
 
-
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_027.png)
 
 ```
-                               SARIMAX Results                                
+                               SARIMAX Results
 ==============================================================================
 Dep. Variable:                      y   No. Observations:                  543
 Model:               SARIMAX(1, 2, 1)   Log Likelihood                1459.052
 Date:                Mon, 27 Apr 2026   AIC                          -2912.104
 Time:                        14:52:46   BIC                          -2899.223
 Sample:                             0   HQIC                         -2907.067
-                                - 543                                         
-Covariance Type:                  opg                                         
+                                - 543
+Covariance Type:                  opg
 ==============================================================================
                  coef    std err          z      P>|z|      [0.025      0.975]
 ------------------------------------------------------------------------------
@@ -1621,13 +1586,11 @@ Ljung-Box residual test — ARIMA(1,2,1)
 ## 7. Forecast trajectory demo (CH07 style)
 ```
 
-
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_028.png)
 
 ```
 ## 8. Rolling forecast — walk-forward (CH07 pattern)
 ```
-
 
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_029.png)
 
@@ -1723,18 +1686,13 @@ Rolling forecast RMSE: 0.0273
 ... [175 more lines truncated] ...
 ```
 
-
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_030.png)
-
 
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_031.png)
 
-
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_032.png)
 
-
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_033.png)
-
 
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_034.png)
 
@@ -1766,15 +1724,11 @@ Addresses: *'PCA captures variance, not causality. How did you verify PC1 = degr
 Shows: scree plot, cumulative variance, loadings heatmap, PC-RUL correlation bar chart.
 ```
 
-
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_035.png)
-
 
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_036.png)
 
-
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_037.png)
-
 
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_038.png)
 
@@ -1811,7 +1765,6 @@ Addresses: *'Double differencing (d=2) destroys long-term signal — why d=2?'*
 Shows histogram of recommended_d across all training engines.
 ```
 
-
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_039.png)
 
 ```
@@ -1828,7 +1781,6 @@ Addresses: *'Isotonic regression could artificially improve results (leakage)'*
 
 Shows: HI quality (R² with -RUL) with vs without isotonic. Prints leakage proof.
 ```
-
 
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_040.png)
 
@@ -1859,7 +1811,6 @@ Addresses: *'Why 5th percentile? This looks post-hoc chosen.'*
 
 Grid searches quantile q on validation data → shows RMSE curve vs q.
 ```
-
 
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_041.png)
 
@@ -1893,7 +1844,6 @@ Addresses: *'Safety factor 0.88 looks like leaderboard tuning on test set'*
 Grid searches sf on simulate_test_from_train() — test data never loaded.
 ```
 
-
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_042.png)
 
 ```
@@ -1923,7 +1873,6 @@ Addresses: *'Ljung-Box p-values near 0 = autocorrelation remains, yet model acce
 
 Reports exactly which lags fail, compares alternative orders, gives explicit verdict.
 ```
-
 
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_043.png)
 
@@ -1969,14 +1918,13 @@ Addresses: *'No baseline against published benchmarks — RMSE 24.76 vs state-of
 Shows our ARIMA and Transformer results versus 5 published FD004 papers.
 ```
 
-
 ![2.3 ARIMA Model + Evidence-Based Validation](report_images/2_3_arima_model___evidence_based_validat_044.png)
 
 ```
 
 === FD004 RMSE Comparison vs Literature ===
                             model       rmse      source
-rank                                                    
+rank
 1               Transformer\n(DL)  12.880000   This work
 2       Q-Transformer\n(quantile)  14.150000   This work
 3     TF-LSTM\n(Song et al. 2022)  14.860000  Literature
@@ -1988,7 +1936,7 @@ rank
 
 Full comparison table:
                             model       rmse      source
-rank                                                    
+rank
 1               Transformer\n(DL)  12.880000   This work
 2       Q-Transformer\n(quantile)  14.150000   This work
 3     TF-LSTM\n(Song et al. 2022)  14.860000  Literature
@@ -2012,7 +1960,6 @@ rank
  'r2_score': 0.6655062437057495,
  'bias': -3.80338716506958}
 ```
-
 
 ---
 
@@ -2082,12 +2029,9 @@ MLP parameters: 201,089
 ## 5. Plots
 ```
 
-
 ![3.1 Deep Learning — MLP](report_images/3_1_deep_learning___mlp_045.png)
 
-
 ![3.1 Deep Learning — MLP](report_images/3_1_deep_learning___mlp_046.png)
-
 
 ---
 
@@ -2155,12 +2099,9 @@ RNN parameters: 15,681
 ## 5. Plots
 ```
 
-
 ![3.2 Deep Learning — RNN](report_images/3_2_deep_learning___rnn_047.png)
 
-
 ![3.2 Deep Learning — RNN](report_images/3_2_deep_learning___rnn_048.png)
-
 
 ---
 
@@ -2229,12 +2170,9 @@ LSTM parameters: 62,529
 ## 5. Plots
 ```
 
-
 ![3.3 Deep Learning — LSTM](report_images/3_3_deep_learning___lstm_049.png)
 
-
 ![3.3 Deep Learning — LSTM](report_images/3_3_deep_learning___lstm_050.png)
-
 
 ---
 
@@ -2303,12 +2241,9 @@ GRU parameters: 46,913
 ## 5. Plots
 ```
 
-
 ![3.4 Deep Learning — GRU](report_images/3_4_deep_learning___gru_051.png)
 
-
 ![3.4 Deep Learning — GRU](report_images/3_4_deep_learning___gru_052.png)
-
 
 ---
 
@@ -2353,7 +2288,7 @@ Encoder-only Transformer:
 4. Mean pool over the sequence → global context vector
 5. Linear head → RUL
 
-> **Why mean-pool instead of last timestep?**  
+> **Why mean-pool instead of last timestep?**
 > Attention already weighs all positions; mean-pooling exploits the full context rather than ignoring earlier cycles.
 ```
 
@@ -2385,12 +2320,9 @@ Transformer parameters: 105,089
 ## 5. Plots
 ```
 
-
 ![3.5 Deep Learning — Transformer](report_images/3_5_deep_learning___transformer_053.png)
 
-
 ![3.5 Deep Learning — Transformer](report_images/3_5_deep_learning___transformer_054.png)
-
 
 ---
 
@@ -2458,7 +2390,6 @@ Trainable parameters: 201,347
 ## 6. Training with Pinball Loss
 ```
 
-
 ![4.1 Quantile — Q-MLP](report_images/4_1_quantile___q_mlp_055.png)
 
 ```
@@ -2469,7 +2400,6 @@ Trainable parameters: 201,347
 ```
 ## 7. Evaluation — Point Metrics (Q50) + Interval Metrics
 ```
-
 
 ![4.1 Quantile — Q-MLP](report_images/4_1_quantile___q_mlp_056.png)
 
@@ -2487,12 +2417,9 @@ Trainable parameters: 201,347
 Addresses critic: *'No calibration metrics — coverage probability, pinball loss missing'*
 ```
 
-
 ![4.1 Quantile — Q-MLP](report_images/4_1_quantile___q_mlp_057.png)
 
-
 ![4.1 Quantile — Q-MLP](report_images/4_1_quantile___q_mlp_058.png)
-
 
 ![4.1 Quantile — Q-MLP](report_images/4_1_quantile___q_mlp_059.png)
 
@@ -2523,7 +2450,6 @@ epistemic uncertainty — model has less certainty about long-horizon prediction
   → Saved to results/all_model_results.csv
 Results saved to results/all_model_results.csv
 ```
-
 
 ---
 
@@ -2591,7 +2517,6 @@ Trainable parameters: 15,811
 ## 6. Training with Pinball Loss
 ```
 
-
 ![4.2 Quantile — Q-RNN](report_images/4_2_quantile___q_rnn_060.png)
 
 ```
@@ -2603,7 +2528,6 @@ Trainable parameters: 15,811
 ```
 ## 7. Evaluation — Point Metrics (Q50) + Interval Metrics
 ```
-
 
 ![4.2 Quantile — Q-RNN](report_images/4_2_quantile___q_rnn_061.png)
 
@@ -2621,12 +2545,9 @@ Trainable parameters: 15,811
 Addresses critic: *'No calibration metrics — coverage probability, pinball loss missing'*
 ```
 
-
 ![4.2 Quantile — Q-RNN](report_images/4_2_quantile___q_rnn_062.png)
 
-
 ![4.2 Quantile — Q-RNN](report_images/4_2_quantile___q_rnn_063.png)
-
 
 ![4.2 Quantile — Q-RNN](report_images/4_2_quantile___q_rnn_064.png)
 
@@ -2657,7 +2578,6 @@ epistemic uncertainty — model has less certainty about long-horizon prediction
   → Saved to results/all_model_results.csv
 Results saved to results/all_model_results.csv
 ```
-
 
 ---
 
@@ -2725,7 +2645,6 @@ Trainable parameters: 62,659
 ## 6. Training with Pinball Loss
 ```
 
-
 ![4.3 Quantile — Q-LSTM](report_images/4_3_quantile___q_lstm_065.png)
 
 ```
@@ -2736,7 +2655,6 @@ Trainable parameters: 62,659
 ```
 ## 7. Evaluation — Point Metrics (Q50) + Interval Metrics
 ```
-
 
 ![4.3 Quantile — Q-LSTM](report_images/4_3_quantile___q_lstm_066.png)
 
@@ -2754,12 +2672,9 @@ Trainable parameters: 62,659
 Addresses critic: *'No calibration metrics — coverage probability, pinball loss missing'*
 ```
 
-
 ![4.3 Quantile — Q-LSTM](report_images/4_3_quantile___q_lstm_067.png)
 
-
 ![4.3 Quantile — Q-LSTM](report_images/4_3_quantile___q_lstm_068.png)
-
 
 ![4.3 Quantile — Q-LSTM](report_images/4_3_quantile___q_lstm_069.png)
 
@@ -2790,7 +2705,6 @@ epistemic uncertainty — model has less certainty about long-horizon prediction
   → Saved to results/all_model_results.csv
 Results saved to results/all_model_results.csv
 ```
-
 
 ---
 
@@ -2858,7 +2772,6 @@ Trainable parameters: 47,043
 ## 6. Training with Pinball Loss
 ```
 
-
 ![4.4 Quantile — Q-GRU](report_images/4_4_quantile___q_gru_070.png)
 
 ```
@@ -2869,7 +2782,6 @@ Trainable parameters: 47,043
 ```
 ## 7. Evaluation — Point Metrics (Q50) + Interval Metrics
 ```
-
 
 ![4.4 Quantile — Q-GRU](report_images/4_4_quantile___q_gru_071.png)
 
@@ -2887,12 +2799,9 @@ Trainable parameters: 47,043
 Addresses critic: *'No calibration metrics — coverage probability, pinball loss missing'*
 ```
 
-
 ![4.4 Quantile — Q-GRU](report_images/4_4_quantile___q_gru_072.png)
 
-
 ![4.4 Quantile — Q-GRU](report_images/4_4_quantile___q_gru_073.png)
-
 
 ![4.4 Quantile — Q-GRU](report_images/4_4_quantile___q_gru_074.png)
 
@@ -2923,7 +2832,6 @@ epistemic uncertainty — model has less certainty about long-horizon prediction
   → Saved to results/all_model_results.csv
 Results saved to results/all_model_results.csv
 ```
-
 
 ---
 
@@ -2991,7 +2899,6 @@ Trainable parameters: 105,219
 ## 6. Training with Pinball Loss
 ```
 
-
 ![4.5 Quantile — Q-Transformer](report_images/4_5_quantile___q_transformer_075.png)
 
 ```
@@ -3002,7 +2909,6 @@ Trainable parameters: 105,219
 ```
 ## 7. Evaluation — Point Metrics (Q50) + Interval Metrics
 ```
-
 
 ![4.5 Quantile — Q-Transformer](report_images/4_5_quantile___q_transformer_076.png)
 
@@ -3020,12 +2926,9 @@ Trainable parameters: 105,219
 Addresses critic: *'No calibration metrics — coverage probability, pinball loss missing'*
 ```
 
-
 ![4.5 Quantile — Q-Transformer](report_images/4_5_quantile___q_transformer_077.png)
 
-
 ![4.5 Quantile — Q-Transformer](report_images/4_5_quantile___q_transformer_078.png)
-
 
 ![4.5 Quantile — Q-Transformer](report_images/4_5_quantile___q_transformer_079.png)
 
@@ -3056,7 +2959,6 @@ epistemic uncertainty — model has less certainty about long-horizon prediction
   → Saved to results/all_model_results.csv
 Results saved to results/all_model_results.csv
 ```
-
 
 ---
 
@@ -3123,7 +3025,6 @@ R²(median-HI, RUL) = -13.3365
 Δ R² (PCA improvement) = +8.1415
 ```
 
-
 ![5. Ablation & Robustness Study](report_images/5__ablation___robustness_study_080.png)
 
 ```
@@ -3140,7 +3041,6 @@ PCA is BETTER — improvement = +8.1415
 
 **Leakage note:** On *test* data, isotonic is fit only on the truncated observed history (no future signal). On *training* data, it uses the full trajectory — this is equivalent to using training labels for feature construction, which is standard practice.
 ```
-
 
 ![5. Ablation & Robustness Study](report_images/5__ablation___robustness_study_081.png)
 
@@ -3223,7 +3123,6 @@ Isotonic Regression Without isotonic  R² = -5.1952  ABLATED
 Saved to results/ablation_summary.csv
 ```
 
-
 ---
 
 ## 6. Final Summary & Benchmark Comparison
@@ -3272,7 +3171,6 @@ Q_Transformer   quantile 13.905    1222.270     0.895   1.014          21.451   
 ## 3. Model Comparison — Bar Charts
 ```
 
-
 ![6. Final Summary & Benchmark Comparison](report_images/6__final_summary___benchmark_comparison_082.png)
 
 ```
@@ -3293,7 +3191,7 @@ Q_Transformer   quantile 13.905    1222.270     0.895   1.014          21.451   
 
 Best per model family:
                model_name   rmse  nasa_score  r2_score
-model_type                                            
+model_type
 quantile    Q_Transformer 13.905    1222.270     0.895
 ```
 
@@ -3316,7 +3214,6 @@ Average coverage (target ≥ 80%): 60.9%
 Average interval width:          23.07 cycles
 ⚠ Coverage below 80% — models may be overconfident
 ```
-
 
 ![6. Final Summary & Benchmark Comparison](report_images/6__final_summary___benchmark_comparison_083.png)
 
@@ -3360,44 +3257,38 @@ Saved: results/all_model_results_summary.csv
 All outputs in results/: [PosixPath('/Users/dhruvparmar/DAU/sem_2/IT_402_Applied_Forecasting_Methods/Project/Aircraft Engine Failure Forecasting/results/all_model_results_summary.csv'), PosixPath('/Users/dhruvparmar/DAU/sem_2/IT_402_Applied_Forecasting_Methods/Project/Aircraft Engine Failure Forecasting/results/all_model_results.csv'), PosixPath('/Users/dhruvparmar/DAU/sem_2/IT_402_Applied_Forecasting_Methods/Project/Aircraft Engine Failure Forecasting/results/ablation_summary.csv'), PosixPath('/Users/dhruvparmar/DAU/sem_2/IT_402_Applied_Forecasting_Methods/Project/Aircraft Engine Failure Forecasting/results/summary_quantile_calibration.png'), PosixPath('/Users/dhruvparmar/DAU/sem_2/IT_402_Applied_Forecasting_Methods/Project/Aircraft Engine Failure Forecasting/results/ablation_pca_vs_median.png')]
 ```
 
-
 ---
 
 ## All Model Results
 
-| model_name | model_type | rmse | nasa_score | r2_score | bias | interval_width | coverage_pct |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Q_Transformer | quantile | 13.905 | 1222.270 | 0.895 | 1.014 | 21.451 | 80.650 |
-| Q_RNN | quantile | 15.291 | 1454.710 | 0.873 | 1.925 | 23.764 | 71.770 |
-| Q_MLP | quantile | 16.072 | 1085.900 | 0.860 | -4.500 | 36.433 | 87.900 |
-| Q_GRU | quantile | 17.072 | 955.660 | 0.842 | -7.522 | 19.234 | 43.150 |
-| ARIMA(1,2,1) | classical | 24.858 | 12335.770 | 0.665 | -3.803 |  |  |
-| Q_LSTM | quantile | 40.312 | 11234.980 | 0.120 | -27.885 | 14.480 | 20.970 |
+| model_name    | model_type | rmse   | nasa_score | r2_score | bias    | interval_width | coverage_pct |
+| ------------- | ---------- | ------ | ---------- | -------- | ------- | -------------- | ------------ |
+| Q_Transformer | quantile   | 13.905 | 1222.270   | 0.895    | 1.014   | 21.451         | 80.650       |
+| Q_RNN         | quantile   | 15.291 | 1454.710   | 0.873    | 1.925   | 23.764         | 71.770       |
+| Q_MLP         | quantile   | 16.072 | 1085.900   | 0.860    | -4.500  | 36.433         | 87.900       |
+| Q_GRU         | quantile   | 17.072 | 955.660    | 0.842    | -7.522  | 19.234         | 43.150       |
+| ARIMA(1,2,1)  | classical  | 24.858 | 12335.770  | 0.665    | -3.803  |                |              |
+| Q_LSTM        | quantile   | 40.312 | 11234.980  | 0.120    | -27.885 | 14.480         | 20.970       |
 
 ---
 
 ## Literature Benchmarks (FD004, RMSE)
 
-| Model | RMSE | Source |
-|-------|------|--------|
-| DCNN (Li et al. 2018) | 22.36 | 10.1016/j.ress.2018.06.005 |
-| BLSTM (Zhang et al. 2018) | 23.99 | 10.1016/j.ress.2018.05.001 |
-| BiLSTM (Zhao et al. 2020) | 18.42 | arxiv 2002.10338 |
-| IBTSA (Chen et al. 2020) | 16.14 | 10.1016/j.ress.2020.107197 |
-| TF-LSTM (Song et al. 2022) | 14.86 | 10.1016/j.engappai.2022.104987 |
-| **Q-Transformer (ours)** | **13.90** | This project |
+> ⚠️ **Placeholder** — add verified papers that explicitly report RMSE on NASA CMAPSS FD004 with RUL cap = 125 cycles.
+> The dataset reference is: Saxena, A., Goebel, K., Simon, D., & Eklund, N. (2008). Damage propagation modeling for aircraft engine run-to-failure simulation. _2008 International Conference on Prognostics and Health Management_. IEEE. https://doi.org/10.1109/PHM.2008.4711414
 
+| Model                           | RMSE      | Source       |
+| ------------------------------- | --------- | ------------ |
+| _(add verified benchmark here)_ | —         | —            |
+| **Q-Transformer (ours)**        | **13.90** | This project |
 
 ---
 
 ## Results Plots
 
-
 ![ablation_pca_vs_median](results/ablation_pca_vs_median.png)
 
-
 ![summary_quantile_calibration](results/summary_quantile_calibration.png)
-
 
 ---
 
@@ -3415,17 +3306,16 @@ All outputs in results/: [PosixPath('/Users/dhruvparmar/DAU/sem_2/IT_402_Applied
 10. FD004 CHOSEN: Only dataset combining 6 conditions + 2 fault modes — hardest generalisation challenge
 ```
 
-
 ---
 
 ## Design Choice Evidence Summary
 
-| Choice | Value | Proof Method | Notebook |
-|--------|-------|-------------|----------|
-| KMeans k | 6 | Silhouette score maximised at k=6; matches NASA 6 conditions | T04 |
-| RUL cap | 125 | Cap sensitivity analysis (RMSE minimum near 125) | T02 |
-| Threshold quantile | 0.05 | Val-set grid search minimises NASA score | T10 |
-| Safety factor | 0.88 | Val-set grid search on NASA loss | T10 |
-| ARIMA d | 2 | ADF test on all 248 engines: mode(recommended_d) = 2 | T10 |
-| Window size | 30 | Val-set RMSE minimised at w=30 (GRU sensitivity) | GRU.ipynb |
-| FD004 chosen | — | Only dataset with 6 conditions AND 2 fault modes simultaneously | T03b |
+| Choice             | Value | Proof Method                                                    | Notebook  |
+| ------------------ | ----- | --------------------------------------------------------------- | --------- |
+| KMeans k           | 6     | Silhouette score maximised at k=6; matches NASA 6 conditions    | T04       |
+| RUL cap            | 125   | Cap sensitivity analysis (RMSE minimum near 125)                | T02       |
+| Threshold quantile | 0.05  | Val-set grid search minimises NASA score                        | T10       |
+| Safety factor      | 0.88  | Val-set grid search on NASA loss                                | T10       |
+| ARIMA d            | 2     | ADF test on all 248 engines: mode(recommended_d) = 2            | T10       |
+| Window size        | 30    | Val-set RMSE minimised at w=30 (GRU sensitivity)                | GRU.ipynb |
+| FD004 chosen       | —     | Only dataset with 6 conditions AND 2 fault modes simultaneously | T03b      |
