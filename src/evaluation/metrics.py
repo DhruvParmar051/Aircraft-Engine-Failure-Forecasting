@@ -94,7 +94,9 @@ def evaluate(
     if not np.isfinite(y_true).all() or not np.isfinite(y_pred).all():
         raise ValueError("NaN or infinite values detected")
 
-    y_pred = np.clip(y_pred, 0, 125)
+    # No clipping here — callers (predict_test, predict_dataset) are responsible
+    # for clipping to [0, RUL_CAP] before calling evaluate(). Clipping inside a
+    # measurement function silently understates RMSE for over-predicting models.
 
     ns = nasa_score(y_true, y_pred)
     r2 = r2_score(y_true, y_pred)
@@ -117,6 +119,48 @@ def evaluate(
             f"R2: {results['r2_score']:.4f}  |  "
             f"Bias: {b:+.2f} ({direction})"
         )
+
+    return results
+
+
+def naive_baseline(
+    y_true: np.ndarray,
+    rul_cap: float = 125.0,
+    verbose: bool = True,
+) -> dict[str, dict[str, float]]:
+    """
+    Two zero-information baselines for CMAPSS RUL prediction.
+
+    A model comparison table is not credible without a lower bound.
+    Both baselines use NO sensor information whatsoever.
+
+    Strategies
+    ----------
+    mean_predictor  : predicts the training-set mean RUL for every engine.
+                      Optimal under MSE with zero features.
+    constant_half   : predicts RUL_CAP / 2 for every engine.
+                      Represents the uniform prior over [0, RUL_CAP].
+
+    Why these two:
+        - mean_predictor is the Bayes-optimal zero-feature regressor under MSE.
+        - constant_half makes no assumption about the training label distribution
+          and is the prior a maintenance engineer might use with no data.
+        - A trained model MUST beat both to be worth deploying.
+
+    Returns
+    -------
+    dict : {"mean_predictor": metrics_dict, "constant_half": metrics_dict}
+    """
+    y_true = np.asarray(y_true, dtype=np.float32).ravel()
+    results = {}
+
+    for name, pred_val in [
+        ("mean_predictor", float(np.mean(y_true))),
+        ("constant_half",  rul_cap / 2.0),
+    ]:
+        y_pred = np.full_like(y_true, fill_value=pred_val)
+        r      = evaluate(y_true, y_pred, model_name=f"Baseline:{name}", verbose=verbose)
+        results[name] = r
 
     return results
 

@@ -154,6 +154,83 @@ def split_by_engine(
     return X[train_mask], X[val_mask], y[train_mask], y[val_mask]
 
 
+def split_by_engine_stratified(
+    df: pd.DataFrame,
+    val_fraction: float = 0.2,
+    random_seed: int = 42,
+    group_col: str = "engine_id",
+    cluster_col: str = "op_cluster",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Stratified engine-level train/validation split.
+
+    Why stratify by op_cluster:
+        FD004 has two fault modes (HPC + Fan degradation). These create two
+        distinct sensor-degradation trajectories. A random split can by chance
+        assign all engines of one fault mode to train and the other to val,
+        causing the validation set to be unrepresentative.
+
+        FD004 does not provide fault-mode labels, but the dominant op_cluster
+        per engine is a measurable proxy: engines spend cycles in the cluster
+        that matches their operating point, and fault modes differ in which
+        sensors degrade under which operating conditions.
+
+        Stratified split ensures both train and val contain engines from every
+        operating regime in roughly the same proportion.
+
+    Why not time-based split (first N engines to train, rest to val):
+        Engine IDs in CMAPSS are not ordered by time or fault mode — they are
+        arbitrary. A time-based split by engine ID provides no guarantee of
+        representative coverage and could still produce a skewed split.
+
+    Parameters
+    ----------
+    cluster_col : column containing the dominant op cluster per row.
+                  Must be present in df. Falls back to random split if absent.
+
+    Returns
+    -------
+    train_df, val_df : DataFrames with engine-level split, no windows straddling the boundary.
+    """
+    rng = np.random.default_rng(random_seed)
+
+    if cluster_col not in df.columns:
+        print(f"  [WARN] '{cluster_col}' not found — falling back to random engine split")
+        engines = np.sort(df[group_col].unique())
+        rng.shuffle(engines)
+        n_val       = max(1, int(len(engines) * val_fraction))
+        val_engines = set(engines[:n_val].tolist())
+    else:
+        # Dominant cluster per engine = cluster with the most cycles for that engine
+        dom_cluster = (
+            df.groupby(group_col)[cluster_col]
+            .agg(lambda x: x.value_counts().index[0])
+            .rename("dom_cluster")
+        )
+
+        val_engines: set = set()
+        for cluster_id, grp in dom_cluster.groupby("dom_cluster"):
+            engine_ids = np.sort(grp.index.values)
+            rng.shuffle(engine_ids)
+            n_val_stratum = max(1, int(len(engine_ids) * val_fraction))
+            val_engines.update(engine_ids[:n_val_stratum].tolist())
+
+    val_mask = df[group_col].isin(val_engines)
+    train_df = df[~val_mask].copy()
+    val_df   = df[val_mask].copy()
+
+    if cluster_col in df.columns:
+        # Report cluster balance in each split
+        train_dist = train_df.groupby(cluster_col)[group_col].nunique().to_dict()
+        val_dist   = val_df.groupby(cluster_col)[group_col].nunique().to_dict()
+        print(f"  stratified split — train engines per cluster: {train_dist}")
+        print(f"  stratified split — val engines per cluster  : {val_dist}")
+
+    print(f"  train/val: {train_df[group_col].nunique()} train engines, "
+          f"{val_df[group_col].nunique()} val engines")
+    return train_df, val_df
+
+
 def get_arima_splits(
     df: pd.DataFrame,
     val_fraction: float = 0.2,

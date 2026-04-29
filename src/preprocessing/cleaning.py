@@ -70,3 +70,98 @@ def drop_sensors(
 def get_sensor_cols(df: pd.DataFrame) -> list[str]:
     """Return sensor columns still present in df after dropping."""
     return [c for c in ALL_SENSOR_COLS if c in df.columns]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SENSOR OUTLIER CLIPPING
+# ──────────────────────────────────────────────────────────────────────────────
+
+def fit_outlier_bounds(
+    train: pd.DataFrame,
+    sensor_cols: list[str],
+    n_iqr: float = 5.0,
+    group_col: str = "op_cluster",
+) -> dict[str, tuple[float, float]]:
+    """
+    Compute per-sensor IQR-based clip bounds from TRAIN data only.
+
+    Why IQR over z-score:
+        Sensor distributions are multi-modal across operating conditions even
+        after per-cluster scaling. IQR is robust to multi-modality; z-score
+        assumes unimodality and would clip valid values in minority clusters.
+
+    Why n_iqr=5 (not 3):
+        n_iqr=3 is commonly used for anomaly detection. For preprocessing we
+        want to remove only gross sensor faults (stuck-at-max, dropout-to-zero)
+        while preserving the degradation signal in extreme-but-valid readings.
+        n_iqr=5 corresponds to values beyond 5× the IQR range — these are
+        almost certainly sensor faults rather than real engine state.
+
+    Why fit on train only:
+        Fitting on test would leak information about the test distribution.
+        If a test engine is genuinely more degraded than any training engine,
+        its extreme sensor readings are valid signal and should NOT be clipped.
+        Using training bounds is therefore the conservative, non-leaking choice.
+
+    Parameters
+    ----------
+    group_col : column used to stratify IQR computation. Defaults to
+                'op_cluster' (available after T04). Pass None to compute
+                global bounds (acceptable for FD001/FD003, single-condition).
+
+    Returns
+    -------
+    bounds : {sensor_name: (lower_clip, upper_clip)}
+             Persist with joblib for inference.
+    """
+    bounds: dict[str, tuple[float, float]] = {}
+    present = [s for s in sensor_cols if s in train.columns]
+
+    if group_col and group_col in train.columns:
+        # Stratified: compute IQR within each cluster, take union of bounds
+        all_lower: dict[str, list[float]] = {s: [] for s in present}
+        all_upper: dict[str, list[float]] = {s: [] for s in present}
+        for _, grp in train.groupby(group_col):
+            q1 = grp[present].quantile(0.25)
+            q3 = grp[present].quantile(0.75)
+            iqr = q3 - q1
+            for s in present:
+                all_lower[s].append(float(q1[s] - n_iqr * iqr[s]))
+                all_upper[s].append(float(q3[s] + n_iqr * iqr[s]))
+        for s in present:
+            bounds[s] = (min(all_lower[s]), max(all_upper[s]))
+    else:
+        q1  = train[present].quantile(0.25)
+        q3  = train[present].quantile(0.75)
+        iqr = q3 - q1
+        for s in present:
+            bounds[s] = (
+                float(q1[s] - n_iqr * iqr[s]),
+                float(q3[s] + n_iqr * iqr[s]),
+            )
+
+    clipped_sensors = [s for s, (lo, hi) in bounds.items() if lo > train[s].min() or hi < train[s].max()]
+    print(f"  [outlier bounds] {len(clipped_sensors)} sensors have values outside "
+          f"±{n_iqr}×IQR: {clipped_sensors}")
+    return bounds
+
+
+def apply_outlier_bounds(
+    df: pd.DataFrame,
+    bounds: dict[str, tuple[float, float]],
+) -> pd.DataFrame:
+    """
+    Clip sensor values to pre-fitted bounds.
+    Sensors not present in bounds are left unchanged.
+    """
+    df = df.copy()
+    clipped_count = 0
+    for sensor, (lo, hi) in bounds.items():
+        if sensor not in df.columns:
+            continue
+        n_before = ((df[sensor] < lo) | (df[sensor] > hi)).sum()
+        df[sensor] = df[sensor].clip(lower=lo, upper=hi)
+        clipped_count += n_before
+    if clipped_count:
+        print(f"  [outlier clip] clipped {clipped_count} values across {len(bounds)} sensors")
+    return df

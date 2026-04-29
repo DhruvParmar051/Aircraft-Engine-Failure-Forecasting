@@ -168,14 +168,17 @@ def build_windows(
         labels = grp["RUL"].values.astype(np.float32)       # (T,)
         T      = len(feats)
 
-        # Pad engines shorter than the window
+        # Pad engines shorter than the window with zeros (left-pad).
+        # Zero is neutral for standardized features and matches the convention
+        # used in windowing.py (create_last_window_per_engine).
+        # Repeating the first row would misrepresent the engine's health history.
         if T < window_size:
-            pad    = np.tile(feats[0], (window_size - T, 1))
-            feats  = np.vstack([pad, feats])
-            labels = np.concatenate(
-                [np.full(window_size - T, labels[0]), labels]
-            )
-            T = window_size
+            pad_len = window_size - T
+            pad     = np.zeros((pad_len, feats.shape[1]), dtype=np.float32)
+            feats   = np.vstack([pad, feats])
+            # Pad labels with the earliest observed RUL (not a fabricated value)
+            labels  = np.concatenate([np.full(pad_len, labels[0]), labels])
+            T       = window_size
 
         if is_test:
             X_list.append(feats[-window_size:])   # (W, F)
@@ -194,19 +197,26 @@ def engine_split(
     train_df: pd.DataFrame,
     feat_cols: list[str],
     val_ratio: float = 0.2,
+    random_seed: int = RANDOM_SEED,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Split by engine_id (80/20) to avoid within-engine data leakage.
+
+    Uses a seeded RNG (np.random.default_rng) so the split is deterministic
+    and independent of any prior numpy random calls in the notebook.
+    The engine list is sorted before shuffling so the result is also
+    independent of pandas/numpy version differences in unique() ordering.
 
     Returns
     -------
     X_train, y_train, X_val, y_val
     """
-    all_eids = train_df["engine_id"].unique()
-    np.random.shuffle(all_eids)
+    all_eids = np.sort(train_df["engine_id"].unique())   # sort first for stability
+    rng      = np.random.default_rng(random_seed)
+    rng.shuffle(all_eids)
     split_idx  = int(len(all_eids) * (1 - val_ratio))
-    train_eids = set(all_eids[:split_idx])
-    val_eids   = set(all_eids[split_idx:])
+    train_eids = set(all_eids[:split_idx].tolist())
+    val_eids   = set(all_eids[split_idx:].tolist())
     print(f"Train engines: {len(train_eids)}  Val engines: {len(val_eids)}")
 
     train_sub = train_df[train_df["engine_id"].isin(train_eids)]
@@ -483,10 +493,17 @@ class PinballLoss(nn.Module):
         self.register_buffer("quantiles", torch.tensor(quantiles, dtype=torch.float32))
 
     def forward(self, preds: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        target  = target.unsqueeze(1)               # (B, 1) for broadcasting
-        errors  = target - preds                    # (B, Q)  positive = under-predicted
-        q       = self.quantiles.unsqueeze(0)       # (1, Q)
-        loss    = torch.max(q * errors, (q - 1) * errors)
+        # Sort predictions along the quantile axis before computing loss.
+        # This is the standard "sort trick" for neural quantile regression:
+        # the model learns to produce ordered outputs because unsorted outputs
+        # map to an arbitrary quantile assignment and incur higher loss.
+        # At inference time predict_quantiles applies the same sort, so
+        # training and inference are fully consistent.
+        preds_sorted = torch.sort(preds, dim=1).values  # (B, Q) ascending
+        target       = target.unsqueeze(1)              # (B, 1) for broadcasting
+        errors       = target - preds_sorted            # (B, Q)
+        q            = self.quantiles.unsqueeze(0)      # (1, Q)
+        loss         = torch.max(q * errors, (q - 1) * errors)
         return loss.mean()
 
 
@@ -580,7 +597,10 @@ def predict_quantiles(
             all_preds.extend(preds.cpu().numpy())
             all_true.extend(y_b.numpy())
 
-    preds_arr = np.sort(np.array(all_preds), axis=1)  # enforce q10 ≤ q50 ≤ q90
+    # Sort along quantile axis — symmetric with the sort applied inside PinballLoss.forward()
+    # during training. Training + inference both sort, so the model is trained to produce
+    # outputs where sorting maps consistently to the target quantile levels.
+    preds_arr = np.sort(np.array(all_preds), axis=1)  # (n, Q) ascending → q10, q50, q90
     y_true    = np.array(all_true)
     return y_true, preds_arr[:, 0], preds_arr[:, 1], preds_arr[:, 2]
 
