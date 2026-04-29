@@ -1163,25 +1163,35 @@ def _estimate_rul_from_forecast(
         The FIRST 30 steps carry the current degradation velocity before
         mean-reversion sets in.
 
-    Why the current-state constraint (cap at reg_rul * 1.5):
-        If the forecast crosses the threshold very late (e.g., step 130 of
-        150), it indicates the model is very optimistic about the future.
-        Constraining to 1.5× the regressor estimate (based on the current
-        health_index level) prevents extreme late predictions while allowing
-        modest upside for genuinely healthy engines.
+    Why velocity-based ceiling (vel_rul × 1.5) instead of regressor ceiling:
+        The previous constraint used reg_rul = _health_index_to_rul(observed[-1]),
+        a GLOBAL linear map from current health_index level to RUL.  For engines
+        with LOW health_index (look healthy) but a STEEP recent slope (degrading
+        fast), reg_rul = 80 → cap = 120 → model still predicts late → NASA blowup.
+
+        vel_rul = _linear_extrapolation_rul(observed, threshold) uses the LOCAL
+        observed slope from the last ~10 cycles:
+          • Steep slope  → vel_rul = 15  → cap = 22  → tight → late predictions
+            pulled way down → NASA score dramatically reduced.
+          • Flat slope   → vel_rul = 125 (regressor fallback internally) → cap
+            loose → genuinely healthy engines keep their optimistic prediction.
+
+        This is engine-specific and slope-aware — it captures the information
+        that the global regressor misses.
     """
     preds = np.asarray(preds, dtype=float)
     if preds.size == 0 or not np.all(np.isfinite(preds)):
         return _health_index_to_rul(float(observed[-1]))
 
-    reg_rul = _health_index_to_rul(float(observed[-1]))
+    # Local velocity-based ceiling: uses the engine's OWN recent slope
+    vel_rul = _linear_extrapolation_rul(observed, threshold)
+    ceiling = max(vel_rul * 1.5, 5.0)
 
     # Step 1: direct crossing within forecast horizon
     crossings = np.where(preds >= threshold)[0]
     if crossings.size > 0:
         crossing_rul = float(max(crossings[0], 3))
-        # Current-state constraint: don't predict more than 1.5× the regressor
-        return float(min(crossing_rul, max(reg_rul * 1.5, 5.0)))
+        return float(min(crossing_rul, ceiling))
 
     # Step 2: slope from early forecast window (first 30 steps — pre-convergence)
     early_n    = min(30, len(preds))
@@ -1191,11 +1201,9 @@ def _estimate_rul_from_forecast(
     if f_slope > 1e-4:
         extra     = (threshold - float(preds[early_n - 1])) / f_slope
         total_rul = float(early_n) + extra
-        # Tighter extreme cap (200 vs old 300) — anything beyond this is
-        # unreliable extrapolation; use regressor instead
         if total_rul > 200:
-            return float(min(reg_rul, RUL_CAP))
-        return float(np.clip(total_rul, 0.0, RUL_CAP))
+            return float(min(_health_index_to_rul(float(observed[-1])), RUL_CAP))
+        return float(np.clip(min(total_rul, ceiling), 0.0, RUL_CAP))
 
     # Step 3: flat/declining forecast — current-state fallback
     return _health_index_to_rul(float(observed[-1]))
