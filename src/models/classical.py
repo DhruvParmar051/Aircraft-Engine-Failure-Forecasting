@@ -65,13 +65,21 @@ DEFAULT_ARIMA_Q = 2
 DEFAULT_ARMA_PRE_DIFF = 2
 SAFETY_FACTOR = 0.88
 
-# Per-engine recency window: fit models on the last RECENT_WINDOW cycles only.
-# WHY: early stable cycles (RUL>100) carry no information about current degradation
-# rate. A model fit on the entire history is dominated by the flat early portion,
-# biasing the slope estimate toward zero and causing late RUL predictions.
-# RECENT_WINDOW=50 covers 2–3× the typical ARIMA order and captures the
-# degradation ramp cleanly on most CMAPSS engines (median length ≈ 200 cycles).
-RECENT_WINDOW   = 50
+# Per-engine recency window: fit models on the last N cycles only.
+# Adaptive: 30% of engine length, clamped to [20, 60].
+# WHY fixed 50 was wrong: a 60-cycle engine with RECENT_WINDOW=50 feeds mostly
+# stable data into SARIMAX → near-zero slope → falls to regressor fallback.
+# A 300-cycle engine with RECENT_WINDOW=50 is fine (last 17% = ramp phase).
+# Adaptive window gives each engine a window proportional to its own length.
+RECENT_WINDOW        = 50   # kept for backwards compat in notebooks
+RECENT_WINDOW_FRAC   = 0.30
+RECENT_WINDOW_MIN    = 20
+RECENT_WINDOW_MAX    = 60
+
+
+def _recency_window(n: int) -> int:
+    """Adaptive recency window: 30% of series length, clamped to [20, 60]."""
+    return int(np.clip(round(n * RECENT_WINDOW_FRAC), RECENT_WINDOW_MIN, RECENT_WINDOW_MAX))
 
 # Candidate orders for per-engine AIC selection (kept small → fast)
 AR_P_CANDIDATES   = [1, 2, 3, 4, 5]
@@ -949,7 +957,11 @@ def check_residuals(
 # 6b. SHARED SARIMAX FITTER — deterministic convergence
 # ─────────────────────────────────────────────
 
-def _fit_sarimax(endog: np.ndarray, order: tuple[int, int, int]):
+def _fit_sarimax(
+    endog: np.ndarray,
+    order: tuple[int, int, int],
+    enforce_invertibility: bool = False,
+):
     """
     Fit SARIMAX with fixed convergence settings so results are reproducible
     across repeated calls on the same data.
@@ -963,10 +975,11 @@ def _fit_sarimax(endog: np.ndarray, order: tuple[int, int, int]):
                           stopping point is budget-determined, not
                           tolerance-determined (which floats with numerical
                           noise).
-      enforce_stationarity / enforce_invertibility = False
-                        — disabling these projections removes a conditional
-                          branch that can differ between runs near the
-                          stationarity boundary.
+      enforce_stationarity=False — removes a conditional branch that can
+                          differ between runs near the stationarity boundary.
+      enforce_invertibility — False for AR/ARMA (speed, reproducibility);
+                          True for ARIMA to prevent explosive MA forecasts on
+                          short 50-point windows with d=2.
       simple_differencing=False — preserves the full state-space likelihood
                                   needed for accurate AIC comparisons.
     """
@@ -975,7 +988,7 @@ def _fit_sarimax(endog: np.ndarray, order: tuple[int, int, int]):
         order=order,
         simple_differencing=False,
         enforce_stationarity=False,
-        enforce_invertibility=False,
+        enforce_invertibility=enforce_invertibility,
     ).fit(disp=False, method="lbfgs", maxiter=200)
 
 
@@ -1150,8 +1163,7 @@ def _estimate_rul_from_forecast(
     threshold: float = None,
 ) -> float:
     """
-    1. Direct crossing within forecast horizon → return that step (capped by
-       current-state estimate to prevent over-optimism).
+    1. Direct crossing within forecast horizon → return that step.
     2. No crossing → slope from the EARLY forecast window → extrapolate.
     3. Flat/negative forecast → fall back to health-index regressor.
 
@@ -1163,40 +1175,26 @@ def _estimate_rul_from_forecast(
         The FIRST 30 steps carry the current degradation velocity before
         mean-reversion sets in.
 
-    Why velocity-based ceiling (vel_rul × 1.5) instead of regressor ceiling:
-        The previous constraint used reg_rul = _health_index_to_rul(observed[-1]),
-        a GLOBAL linear map from current health_index level to RUL.  For engines
-        with LOW health_index (look healthy) but a STEEP recent slope (degrading
-        fast), reg_rul = 80 → cap = 120 → model still predicts late → NASA blowup.
-
-        vel_rul = _linear_extrapolation_rul(observed, threshold) uses the LOCAL
-        observed slope from the last ~10 cycles:
-          • Steep slope  → vel_rul = 15  → cap = 22  → tight → late predictions
-            pulled way down → NASA score dramatically reduced.
-          • Flat slope   → vel_rul = 125 (regressor fallback internally) → cap
-            loose → genuinely healthy engines keep their optimistic prediction.
-
-        This is engine-specific and slope-aware — it captures the information
-        that the global regressor misses.
+    No velocity ceiling here — model-specific callers (AR, ARMA) apply their
+    own ceiling after calling this function. ARIMA does not need one because
+    its d=2 differencing already tracks the true trajectory closely.
     """
     preds = np.asarray(preds, dtype=float)
     if preds.size == 0 or not np.all(np.isfinite(preds)):
-        return _health_index_to_rul(float(observed[-1]))
+        return _linear_extrapolation_rul(observed, threshold)
 
-    # Local velocity-based ceiling: uses the engine's OWN recent slope.
-    # Multiplier 2.0 (not 1.5): 1.5 over-constrained well-calibrated ARIMA
-    # predictions — for engines where ARIMA was already correct (pred ≈ true),
-    # a tight ceiling introduced new early errors larger than the late errors
-    # it removed.  2.0 still cuts extreme late predictions by 40–60% while
-    # allowing ±1× the velocity estimate as legitimate upside.
-    vel_rul = _linear_extrapolation_rul(observed, threshold)
-    ceiling = max(vel_rul * 2.0, 5.0)
+    # Pre-check: if current health_index is already past threshold, the engine
+    # is at EOL — use local velocity directly. Without this, preds[0] >= threshold
+    # immediately → crossings[0]=0 → returns RUL=3 even when true RUL is 20-40.
+    if float(observed[-1]) >= threshold:
+        return _linear_extrapolation_rul(
+            observed, threshold, tail=max(5, min(15, len(observed) // 4))
+        )
 
     # Step 1: direct crossing within forecast horizon
     crossings = np.where(preds >= threshold)[0]
     if crossings.size > 0:
-        crossing_rul = float(max(crossings[0], 3))
-        return float(min(crossing_rul, ceiling))
+        return float(max(crossings[0], 3))
 
     # Step 2: slope from early forecast window (first 30 steps — pre-convergence)
     early_n    = min(30, len(preds))
@@ -1206,12 +1204,16 @@ def _estimate_rul_from_forecast(
     if f_slope > 1e-4:
         extra     = (threshold - float(preds[early_n - 1])) / f_slope
         total_rul = float(early_n) + extra
-        if total_rul > 200:
-            return float(min(_health_index_to_rul(float(observed[-1])), RUL_CAP))
-        return float(np.clip(min(total_rul, ceiling), 0.0, RUL_CAP))
+        if total_rul <= 200:
+            return float(np.clip(total_rul, 0.0, RUL_CAP))
+        # extrapolation too large — fall through to local velocity below
 
-    # Step 3: flat/declining forecast — current-state fallback
-    return _health_index_to_rul(float(observed[-1]))
+    # Step 3: flat/declining forecast OR large extrapolation — use local
+    # velocity, not global regressor. The regressor returns ~125 for healthy-
+    # looking engines (low health_index), causing catastrophic late predictions
+    # when true RUL is small. _linear_extrapolation_rul uses the engine's own
+    # recent slope and naturally returns a low RUL for fast-degrading engines.
+    return _linear_extrapolation_rul(observed, threshold)
 
 def _invert_diff(
     diff_preds: np.ndarray,
@@ -1268,18 +1270,25 @@ def predict_rul_ar(
     No per-engine AIC override — the notebook's order selection is model-specific
     (fits on diff-d series for AR) and must not be replaced by a generic search.
 
-    Recency window: fit on last RECENT_WINDOW cycles only — early stable cycles
-    bias the slope estimate toward zero and inflate RUL predictions.
+    Recency window: adaptive — 30% of engine length, clamped [20, 60]. Early
+    stable cycles bias the slope estimate toward zero and inflate RUL predictions.
     """
     smoothed   = smooth_series(series, smooth_window)
-    fit_series = smoothed[-RECENT_WINDOW:] if len(smoothed) > RECENT_WINDOW else smoothed
+    rw         = _recency_window(len(smoothed))
+    fit_series = smoothed[-rw:] if len(smoothed) > rw else smoothed
 
     if len(fit_series) <= p + pre_diff_d + 5:
         return _linear_extrapolation_rul(smoothed, threshold)
     try:
-        res   = _fit_sarimax(fit_series, order=(p, pre_diff_d, 0))
-        preds = res.forecast(steps=MAX_HORIZON)
-        return _estimate_rul_from_forecast(preds, smoothed, threshold)
+        res       = _fit_sarimax(fit_series, order=(p, pre_diff_d, 0))
+        preds     = res.forecast(steps=MAX_HORIZON)
+        model_rul = _estimate_rul_from_forecast(preds, smoothed, threshold)
+        # AR over-shoots on engines with a steep recent ramp: without a ceiling
+        # it returns crossing_rul >> true_rul → large late error → NASA blowup.
+        # 1.5× vel_rul is the tightest multiplier that does not introduce new
+        # early errors for well-predicted engines (confirmed at round-3 metrics).
+        vel_rul = _linear_extrapolation_rul(smoothed, threshold)
+        return float(min(model_rul, max(vel_rul * 1.5, 5.0)))
     except Exception:
         return _linear_extrapolation_rul(smoothed, threshold)
 
@@ -1310,14 +1319,19 @@ def predict_rul_arma(
     `pre_diff_d` is passed as the SARIMAX internal d for API compatibility.
     """
     smoothed   = smooth_series(series, smooth_window)
-    fit_series = smoothed[-RECENT_WINDOW:] if len(smoothed) > RECENT_WINDOW else smoothed
+    rw         = _recency_window(len(smoothed))
+    fit_series = smoothed[-rw:] if len(smoothed) > rw else smoothed
 
     if len(fit_series) <= p + pre_diff_d + q + 3:
         return _linear_extrapolation_rul(smoothed, threshold)
     try:
-        res   = _fit_sarimax(fit_series, order=(p, pre_diff_d, q))
-        preds = res.forecast(steps=MAX_HORIZON)
-        return _estimate_rul_from_forecast(preds, smoothed, threshold)
+        res       = _fit_sarimax(fit_series, order=(p, pre_diff_d, q))
+        preds     = res.forecast(steps=MAX_HORIZON)
+        model_rul = _estimate_rul_from_forecast(preds, smoothed, threshold)
+        # Same 1.5× velocity ceiling as AR — MA terms don't prevent over-shooting
+        # when the forecast overshoots the threshold on a steep-ramp engine.
+        vel_rul = _linear_extrapolation_rul(smoothed, threshold)
+        return float(min(model_rul, max(vel_rul * 1.5, 5.0)))
     except Exception:
         return _linear_extrapolation_rul(smoothed, threshold)
 
@@ -1337,19 +1351,24 @@ def predict_rul_arima(
     """
     ARIMA(p,d,q) via SARIMAX. SARIMAX handles differencing internally.
 
-    Uses recency window (RECENT_WINDOW cycles) so the model fits the current
-    degradation phase rather than the entire early-stable history.
-    Passed p,d,q from notebook's select_best_arima_order are used directly.
+    Uses adaptive recency window so the model fits the current degradation
+    phase. Passed p,d,q from notebook's select_best_arima_order are used directly.
     """
     smoothed   = smooth_series(series, smooth_window)
-    fit_series = smoothed[-RECENT_WINDOW:] if len(smoothed) > RECENT_WINDOW else smoothed
+    rw         = _recency_window(len(smoothed))
+    fit_series = smoothed[-rw:] if len(smoothed) > rw else smoothed
 
     if len(fit_series) <= p + d + q + 3:
         return _linear_extrapolation_rul(smoothed, threshold)
     try:
-        res   = _fit_sarimax(fit_series, order=(p, d, q))
-        preds = res.forecast(steps=MAX_HORIZON)
-        return _estimate_rul_from_forecast(preds, smoothed, threshold)
+        res       = _fit_sarimax(fit_series, order=(p, d, q), enforce_invertibility=True)
+        preds     = res.forecast(steps=MAX_HORIZON)
+        model_rul = _estimate_rul_from_forecast(preds, smoothed, threshold)
+        # ARIMA(p,2,q) with enforce_invertibility=False can produce explosive MA
+        # forecasts on short windows → crossing at step 1–3 → RUL=3 for engines
+        # with true RUL 50+. Ceiling mirrors the proven AR/ARMA fix.
+        vel_rul = _linear_extrapolation_rul(smoothed, threshold)
+        return float(min(model_rul, max(vel_rul * 1.5, 5.0)))
     except Exception:
         return _linear_extrapolation_rul(smoothed, threshold)
 
