@@ -73,6 +73,7 @@ Thumbs.db
 # =========================
 *.txt
 *.pdf
+*.pklss
 
 # =========================
 # Python
@@ -118,6 +119,7 @@ env/
 
 
 data
-artifacts
+artifacts/*
 results
 lightning_logs
+artifacts/kmeans_op_clusters.pkl
