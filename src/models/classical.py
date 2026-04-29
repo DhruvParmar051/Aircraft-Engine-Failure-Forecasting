@@ -1150,37 +1150,54 @@ def _estimate_rul_from_forecast(
     threshold: float = None,
 ) -> float:
     """
-    1. Direct crossing within forecast horizon → return that step.
-    2. No crossing → fit slope to forecast tail → extrapolate to threshold.
+    1. Direct crossing within forecast horizon → return that step (capped by
+       current-state estimate to prevent over-optimism).
+    2. No crossing → slope from the EARLY forecast window → extrapolate.
     3. Flat/negative forecast → fall back to health-index regressor.
 
-    No global state is mutated. Fallback happens silently; predict_dataset
-    prints the aggregate fallback rate after all engines are processed.
+    Why early-window slope (first 30 steps) instead of last 50%:
+        ARIMA(p,2,q) converges toward its long-run mean after ~20–30 steps.
+        Using the LAST 50% of a 150-step forecast means sampling from the
+        near-converged portion → slope ≈ 0 → extrapolated RUL → ∞ → capped
+        at 125, producing large positive errors and catastrophic NASA scores.
+        The FIRST 30 steps carry the current degradation velocity before
+        mean-reversion sets in.
+
+    Why the current-state constraint (cap at reg_rul * 1.5):
+        If the forecast crosses the threshold very late (e.g., step 130 of
+        150), it indicates the model is very optimistic about the future.
+        Constraining to 1.5× the regressor estimate (based on the current
+        health_index level) prevents extreme late predictions while allowing
+        modest upside for genuinely healthy engines.
     """
     preds = np.asarray(preds, dtype=float)
     if preds.size == 0 or not np.all(np.isfinite(preds)):
         return _health_index_to_rul(float(observed[-1]))
 
-    # Step 1: direct crossing within forecast
+    reg_rul = _health_index_to_rul(float(observed[-1]))
+
+    # Step 1: direct crossing within forecast horizon
     crossings = np.where(preds >= threshold)[0]
     if crossings.size > 0:
-        return float(max(crossings[0], 3))
+        crossing_rul = float(max(crossings[0], 3))
+        # Current-state constraint: don't predict more than 1.5× the regressor
+        return float(min(crossing_rul, max(reg_rul * 1.5, 5.0)))
 
-    # Step 2: forecast slope extrapolation (last 50% of forecast)
-    tail_start = max(1, len(preds) // 2)
-    tail       = preds[tail_start:]
-    x          = np.arange(len(tail), dtype=float)
-    f_slope, _ = np.polyfit(x, tail, 1)
+    # Step 2: slope from early forecast window (first 30 steps — pre-convergence)
+    early_n    = min(30, len(preds))
+    x          = np.arange(early_n, dtype=float)
+    f_slope, _ = np.polyfit(x, preds[:early_n], 1)
 
     if f_slope > 1e-4:
-        extra     = (threshold - float(preds[-1])) / f_slope
-        total_rul = float(len(preds)) + extra
-        # If extrapolation says >300 cycles the forecast slope is too flat to trust
-        if total_rul > 300:
-            return _health_index_to_rul(float(observed[-1]))
+        extra     = (threshold - float(preds[early_n - 1])) / f_slope
+        total_rul = float(early_n) + extra
+        # Tighter extreme cap (200 vs old 300) — anything beyond this is
+        # unreliable extrapolation; use regressor instead
+        if total_rul > 200:
+            return float(min(reg_rul, RUL_CAP))
         return float(np.clip(total_rul, 0.0, RUL_CAP))
 
-    # Step 3: flat forecast — fall back to health-index → RUL regressor
+    # Step 3: flat/declining forecast — current-state fallback
     return _health_index_to_rul(float(observed[-1]))
 
 def _invert_diff(
@@ -1228,43 +1245,26 @@ def predict_rul_ar(
     AR(p) implemented as SARIMAX(p, d, 0) — SARIMAX handles differencing internally.
 
     Why SARIMAX(p, d, 0) instead of pre-diff + SARIMAX(p, 0, 0):
+        Pre-differencing + AR(p, 0, 0) forecasts Δ^d(health_index) which converges
+        to 0 within p steps → flat trajectory in original space → no threshold
+        crossing → falls back to regressor entirely.
+        SARIMAX(p, d, 0) propagates the level AND slope forward — trajectory
+        continues rising and crosses the threshold.
 
-        Pre-differencing + AR(p, 0, 0) is theoretically correct for a stationary AR
-        model, BUT it breaks RUL forecasting:
-          - AR(p) on a stationary diff-d series forecasts Δ^d(health_index)
-          - These forecasts converge to 0 within p steps (the mean of the diff series)
-          - Inverting d=2 cumulative sums of near-zeros gives a FLAT trajectory
-          - A flat trajectory never crosses the failure threshold
-          - Nearly all engines fall through to the regressor fallback
-          - The "AR prediction" is then just the health_index → RUL regressor, not AR at all
+    The passed `p` (from notebook's select_best_ar_order) is used directly.
+    No per-engine AIC override — the notebook's order selection is model-specific
+    (fits on diff-d series for AR) and must not be replaced by a generic search.
 
-        SARIMAX(p, d, 0) keeps d inside the state-space model, so the forecast
-        propagates the level AND slope forward — the trajectory continues to rise
-        and crosses the threshold.  Mathematically this is ARIMA(p, d, 0), which is
-        the correct name for "AR with integrated differencing."  The parameters are
-        still purely autoregressive (no MA terms), so the AR vs ARIMA(p,d,0) naming
-        distinction is preserved; only the implementation changes.
-
-    Additional improvements over the old approach:
-      - Recency window: fit on last RECENT_WINDOW cycles only (recent data more
-        relevant than early stable cycles from RUL>100)
-      - Per-engine AIC order: select best p from AR_P_CANDIDATES for this specific
-        engine rather than using a fixed global modal p
+    Recency window: fit on last RECENT_WINDOW cycles only — early stable cycles
+    bias the slope estimate toward zero and inflate RUL predictions.
     """
-    smoothed = smooth_series(series, smooth_window)
-
-    # Recency window — fit on the most recent cycles only
+    smoothed   = smooth_series(series, smooth_window)
     fit_series = smoothed[-RECENT_WINDOW:] if len(smoothed) > RECENT_WINDOW else smoothed
 
     if len(fit_series) <= p + pre_diff_d + 5:
         return _linear_extrapolation_rul(smoothed, threshold)
-
-    # Per-engine adaptive order selection
-    best_p = _aic_select_ar(fit_series, pre_diff_d)
-
     try:
-        # SARIMAX(p, d, 0): d handled internally → trend preserved in forecast
-        res   = _fit_sarimax(fit_series, order=(best_p, pre_diff_d, 0))
+        res   = _fit_sarimax(fit_series, order=(p, pre_diff_d, 0))
         preds = res.forecast(steps=MAX_HORIZON)
         return _estimate_rul_from_forecast(preds, smoothed, threshold)
     except Exception:
@@ -1286,35 +1286,23 @@ def predict_rul_arma(
     """
     ARMA(p,q) implemented as SARIMAX(p, d, q) — SARIMAX handles differencing.
 
-    Why the same fix as AR applies here:
-        ARMA(p,q) on a pre-differenced series has identical mean-reversion
-        pathology: the MA component modifies the transient, but the long-run
-        forecast still converges to 0 in differenced space → flat in original
-        space → no threshold crossing → falls back to regressor.
+    ARMA(p,q) on a pre-differenced series converges to 0 in differenced space
+    → flat trajectory → no threshold crossing → falls back to regressor.
+    SARIMAX(p, d, q) with d≥1 preserves the trend → threshold crossing works.
 
-        SARIMAX(p, d, q) with d≥1 preserves the integrated trend, so the
-        forecast continues rising and crosses the failure threshold.  The model
-        still has both AR and MA terms (unlike ARIMA(p,d,0) used for AR) —
-        the distinction between ARMA and ARIMA is preserved by the MA terms.
+    The MA terms (q>0) distinguish this from AR(p,d,0).  The passed p,q come
+    from the notebook's select_best_arma_order which fits on the diff-d series
+    — this order is model-specific and used directly (no per-engine override).
 
-    `pre_diff_d` is passed as the SARIMAX internal `d` (same semantics as in
-    predict_rul_arima). The parameter name is kept for API compatibility with
-    existing notebook partial() calls.
+    `pre_diff_d` is passed as the SARIMAX internal d for API compatibility.
     """
-    smoothed = smooth_series(series, smooth_window)
-
-    # Recency window
+    smoothed   = smooth_series(series, smooth_window)
     fit_series = smoothed[-RECENT_WINDOW:] if len(smoothed) > RECENT_WINDOW else smoothed
 
     if len(fit_series) <= p + pre_diff_d + q + 3:
         return _linear_extrapolation_rul(smoothed, threshold)
-
-    # Per-engine adaptive order selection
-    best_p, best_q = _aic_select_arma(fit_series, pre_diff_d)
-
     try:
-        # SARIMAX(p, d, q): d handled internally → trend preserved in forecast
-        res   = _fit_sarimax(fit_series, order=(best_p, pre_diff_d, best_q))
+        res   = _fit_sarimax(fit_series, order=(p, pre_diff_d, q))
         preds = res.forecast(steps=MAX_HORIZON)
         return _estimate_rul_from_forecast(preds, smoothed, threshold)
     except Exception:
@@ -1336,24 +1324,17 @@ def predict_rul_arima(
     """
     ARIMA(p,d,q) via SARIMAX. SARIMAX handles differencing internally.
 
-    Improvements over the previous version:
-      - Recency window: fit on last RECENT_WINDOW cycles (recent trend dominates)
-      - Per-engine AIC order: select best (p,q) from ARMA_P/Q_CANDIDATES
-      - MAX_HORIZON already set to 150 (consistent with RUL_CAP=125)
+    Uses recency window (RECENT_WINDOW cycles) so the model fits the current
+    degradation phase rather than the entire early-stable history.
+    Passed p,d,q from notebook's select_best_arima_order are used directly.
     """
-    smoothed = smooth_series(series, smooth_window)
-
-    # Recency window
+    smoothed   = smooth_series(series, smooth_window)
     fit_series = smoothed[-RECENT_WINDOW:] if len(smoothed) > RECENT_WINDOW else smoothed
 
     if len(fit_series) <= p + d + q + 3:
         return _linear_extrapolation_rul(smoothed, threshold)
-
-    # Per-engine adaptive order selection
-    best_p, best_q = _aic_select_arma(fit_series, d)
-
     try:
-        res   = _fit_sarimax(fit_series, order=(best_p, d, best_q))
+        res   = _fit_sarimax(fit_series, order=(p, d, q))
         preds = res.forecast(steps=MAX_HORIZON)
         return _estimate_rul_from_forecast(preds, smoothed, threshold)
     except Exception:
