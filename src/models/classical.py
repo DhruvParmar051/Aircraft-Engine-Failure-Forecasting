@@ -1329,18 +1329,18 @@ def predict_rul_arma(
     smooth_window: int = SMOOTH_WINDOW,
 ) -> float:
     """
+    Deprecated. Use predict_rul_arima_with_ci() which returns CI bounds too.
+
     Internally fits SARIMAX(p, d=pre_diff_d, q) — i.e. ARIMA(p, d, q).
-
-    NAMING NOTE (fixed): The course chapter T09 was labelled "ARMA" following
-    Peixeiro CH06, but ADF stationarity tests on FD004 health_index require
-    d=2 for 95% of engines. True ARMA requires d=0; applying d=2 here makes
-    this ARIMA(p, 2, q) by definition. The parameter name `pre_diff_d` and
-    constant `DEFAULT_ARMA_PRE_DIFF=2` document this correctly. Results stored
-    in the CSV use the caller-supplied model_name — notebooks should now pass
-    "ARIMA({p},{pre_diff_d},{q})" rather than "ARMA({p},{q})".
-
-    The MA terms (q>0) distinguish this from the pure AR(p,d,0) model.
+    This function is ARIMA, not ARMA (pre_diff_d=2 means d=2; true ARMA requires d=0).
     """
+    import warnings
+    warnings.warn(
+        "predict_rul_arma is deprecated and mislabelled — use predict_rul_arima_with_ci() "
+        "which returns confidence interval bounds. This function applies d=pre_diff_d "
+        "differencing, making it ARIMA(p,d,q) not ARMA.",
+        DeprecationWarning, stacklevel=2,
+    )
     smoothed   = smooth_series(series, smooth_window)
     rw         = _recency_window(len(smoothed))
     fit_series = smoothed[-rw:] if len(smoothed) > rw else smoothed
