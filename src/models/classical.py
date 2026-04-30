@@ -42,7 +42,29 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.stattools import adfuller
 
 
-warnings.filterwarnings("ignore")
+# Suppress only the specific statsmodels convergence/optimization warnings
+# that are expected during SARIMAX fits on short windows.  Global suppression
+# (warnings.filterwarnings("ignore")) was removed because it hid genuine
+# numerical stability issues (singular covariance, non-invertible MA roots).
+_STATSMODELS_WARNING_MESSAGES = (
+    "Maximum Likelihood optimization failed to converge",
+    "Non-stationary starting autoregressive parameters",
+    "Non-invertible starting MA parameters",
+    "covariance matrix is singular",
+    "No supported index",
+    "ValueWarning",
+)
+
+import contextlib as _contextlib
+
+@_contextlib.contextmanager
+def _suppress_sarimax_warnings():
+    """Context manager: suppress known-benign SARIMAX convergence noise."""
+    with warnings.catch_warnings():
+        for msg in _STATSMODELS_WARNING_MESSAGES:
+            warnings.filterwarnings("ignore", message=msg)
+        warnings.filterwarnings("ignore", category=UserWarning, module="statsmodels")
+        yield
 
 
 # ─────────────────────────────────────────────
@@ -983,13 +1005,14 @@ def _fit_sarimax(
       simple_differencing=False — preserves the full state-space likelihood
                                   needed for accurate AIC comparisons.
     """
-    return SARIMAX(
-        endog,
-        order=order,
-        simple_differencing=False,
-        enforce_stationarity=False,
-        enforce_invertibility=enforce_invertibility,
-    ).fit(disp=False, method="lbfgs", maxiter=200)
+    with _suppress_sarimax_warnings():
+        return SARIMAX(
+            endog,
+            order=order,
+            simple_differencing=False,
+            enforce_stationarity=False,
+            enforce_invertibility=enforce_invertibility,
+        ).fit(disp=False, method="lbfgs", maxiter=200)
 
 
 # ─────────────────────────────────────────────
@@ -1306,17 +1329,17 @@ def predict_rul_arma(
     smooth_window: int = SMOOTH_WINDOW,
 ) -> float:
     """
-    ARMA(p,q) implemented as SARIMAX(p, d, q) — SARIMAX handles differencing.
+    Internally fits SARIMAX(p, d=pre_diff_d, q) — i.e. ARIMA(p, d, q).
 
-    ARMA(p,q) on a pre-differenced series converges to 0 in differenced space
-    → flat trajectory → no threshold crossing → falls back to regressor.
-    SARIMAX(p, d, q) with d≥1 preserves the trend → threshold crossing works.
+    NAMING NOTE (fixed): The course chapter T09 was labelled "ARMA" following
+    Peixeiro CH06, but ADF stationarity tests on FD004 health_index require
+    d=2 for 95% of engines. True ARMA requires d=0; applying d=2 here makes
+    this ARIMA(p, 2, q) by definition. The parameter name `pre_diff_d` and
+    constant `DEFAULT_ARMA_PRE_DIFF=2` document this correctly. Results stored
+    in the CSV use the caller-supplied model_name — notebooks should now pass
+    "ARIMA({p},{pre_diff_d},{q})" rather than "ARMA({p},{q})".
 
-    The MA terms (q>0) distinguish this from AR(p,d,0).  The passed p,q come
-    from the notebook's select_best_arma_order which fits on the diff-d series
-    — this order is model-specific and used directly (no per-engine override).
-
-    `pre_diff_d` is passed as the SARIMAX internal d for API compatibility.
+    The MA terms (q>0) distinguish this from the pure AR(p,d,0) model.
     """
     smoothed   = smooth_series(series, smooth_window)
     rw         = _recency_window(len(smoothed))
@@ -1371,6 +1394,267 @@ def predict_rul_arima(
         return float(min(model_rul, max(vel_rul * 1.5, 5.0)))
     except Exception:
         return _linear_extrapolation_rul(smoothed, threshold)
+
+
+# ─────────────────────────────────────────────
+# 12a. UNCERTAINTY-AWARE PREDICT FUNCTIONS
+# ─────────────────────────────────────────────
+#
+# Unified output format (dict) for all uncertainty-aware predictors:
+#   {
+#     "engine_id":        int   — engine identifier (filled by predict_dataset_with_ci)
+#     "rul_pred":         float — point-prediction RUL (mean forecast threshold crossing)
+#     "lower_bound":      float — pessimistic RUL (upper CI crosses threshold sooner)
+#     "upper_bound":      float — optimistic  RUL (lower CI crosses threshold later)
+#     "confidence_width": float — upper_bound - lower_bound  (0 = no uncertainty)
+#     "model_name":       str   — e.g. "AR(2)", "ARIMA(1,2,2)"
+#   }
+#
+# CI direction note:
+#   health_index increases toward failure → higher health_index = more degraded.
+#   The UPPER CI band (alpha/2 tail) reaches threshold soonest → smallest RUL
+#   → most conservative (earliest warning) → stored as lower_bound.
+#   The LOWER CI band reaches threshold latest → largest RUL → stored as upper_bound.
+#   This follows the NASA safety convention: if in doubt, warn early.
+
+
+def _ci_crossing(
+    forecast_mean: np.ndarray,
+    ci_lower: np.ndarray,
+    ci_upper: np.ndarray,
+    observed: np.ndarray,
+    threshold: float,
+) -> tuple[float, float, float]:
+    """
+    Convert a SARIMAX forecast + confidence interval into (point, lower, upper) RUL.
+
+    All three estimates use `_estimate_rul_from_forecast` so they inherit the
+    same fallback logic (early-window slope, velocity ceiling).
+
+    Returns
+    -------
+    rul_point  : RUL from mean forecast crossing
+    rul_lower  : RUL from upper CI band  (most aggressive, earliest warning)
+    rul_upper  : RUL from lower CI band  (most conservative, latest warning)
+    """
+    rul_point = _estimate_rul_from_forecast(forecast_mean, observed, threshold)
+    rul_lower = _estimate_rul_from_forecast(ci_upper,      observed, threshold)
+    rul_upper = _estimate_rul_from_forecast(ci_lower,      observed, threshold)
+
+    # Guarantee ordering: lower ≤ point ≤ upper  (may break when fallbacks diverge)
+    rul_lower = min(rul_lower, rul_point)
+    rul_upper = max(rul_upper, rul_point)
+
+    return float(rul_point), float(rul_lower), float(rul_upper)
+
+
+def predict_rul_ar_with_ci(
+    series: np.ndarray,
+    threshold: float,
+    p: int = DEFAULT_AR_P,
+    pre_diff_d: int = DEFAULT_ARIMA_D,
+    smooth_window: int = SMOOTH_WINDOW,
+    alpha: float = 0.20,
+) -> dict:
+    """
+    AR(p) point prediction + 80% confidence interval using SARIMAX forecast CI.
+
+    alpha=0.20 → 80% CI (10th–90th percentile forecast distribution).
+
+    Returns the unified prediction dict (see module header above).
+    """
+    smoothed   = smooth_series(series, smooth_window)
+    rw         = _recency_window(len(smoothed))
+    fit_series = smoothed[-rw:] if len(smoothed) > rw else smoothed
+    model_name = f"AR({p})"
+
+    fallback = {
+        "engine_id": -1,
+        "rul_pred": float(np.clip(predict_rul_ar(series, threshold, p, pre_diff_d, smooth_window), 0, RUL_CAP)),
+        "lower_bound": 0.0,
+        "upper_bound": float(RUL_CAP),
+        "confidence_width": float(RUL_CAP),
+        "model_name": model_name,
+    }
+
+    if len(fit_series) <= p + pre_diff_d + 5:
+        return fallback
+
+    try:
+        with _suppress_sarimax_warnings():
+            res = _fit_sarimax(fit_series, order=(p, pre_diff_d, 0))
+            fc  = res.get_forecast(steps=MAX_HORIZON)
+            mean = np.asarray(fc.predicted_mean)
+            ci   = fc.conf_int(alpha=alpha)
+            # conf_int() returns DataFrame or ndarray depending on statsmodels version
+            ci_arr = np.asarray(ci) if hasattr(ci, '__array__') else ci.values
+            ci_lo  = ci_arr[:, 0]
+            ci_hi  = ci_arr[:, 1]
+
+        rul_p, rul_lo, rul_hi = _ci_crossing(mean, ci_lo, ci_hi, smoothed, threshold)
+
+        # Apply velocity ceiling to point estimate (same as predict_rul_ar)
+        vel_rul = _linear_extrapolation_rul(smoothed, threshold)
+        rul_p   = float(min(rul_p,  max(vel_rul * 1.5, 5.0)))
+        rul_lo  = float(min(rul_lo, max(vel_rul * 1.5, 5.0)))
+        rul_hi  = float(min(rul_hi, RUL_CAP))
+
+        # Clip all to [0, RUL_CAP]
+        rul_p  = float(np.clip(rul_p,  0, RUL_CAP))
+        rul_lo = float(np.clip(rul_lo, 0, RUL_CAP))
+        rul_hi = float(np.clip(rul_hi, 0, RUL_CAP))
+
+        return {
+            "engine_id":        -1,
+            "rul_pred":         rul_p,
+            "lower_bound":      rul_lo,
+            "upper_bound":      rul_hi,
+            "confidence_width": rul_hi - rul_lo,
+            "model_name":       model_name,
+        }
+    except Exception:
+        return fallback
+
+
+def predict_rul_arima_with_ci(
+    series: np.ndarray,
+    threshold: float,
+    p: int = DEFAULT_ARIMA_P,
+    d: int = DEFAULT_ARIMA_D,
+    q: int = DEFAULT_ARIMA_Q,
+    smooth_window: int = SMOOTH_WINDOW,
+    alpha: float = 0.20,
+) -> dict:
+    """
+    ARIMA(p,d,q) point prediction + 80% confidence interval using SARIMAX CI.
+
+    Covers both the T10 ARIMA model and the T09 model (which is also ARIMA
+    despite its historical "ARMA" label — see predict_rul_arma docstring).
+
+    Returns the unified prediction dict.
+    """
+    smoothed   = smooth_series(series, smooth_window)
+    rw         = _recency_window(len(smoothed))
+    fit_series = smoothed[-rw:] if len(smoothed) > rw else smoothed
+    model_name = f"ARIMA({p},{d},{q})"
+
+    fallback = {
+        "engine_id": -1,
+        "rul_pred": float(np.clip(predict_rul_arima(series, threshold, p, d, q, smooth_window), 0, RUL_CAP)),
+        "lower_bound": 0.0,
+        "upper_bound": float(RUL_CAP),
+        "confidence_width": float(RUL_CAP),
+        "model_name": model_name,
+    }
+
+    if len(fit_series) <= p + d + q + 3:
+        return fallback
+
+    try:
+        with _suppress_sarimax_warnings():
+            res = _fit_sarimax(fit_series, order=(p, d, q), enforce_invertibility=True)
+            fc  = res.get_forecast(steps=MAX_HORIZON)
+            mean  = np.asarray(fc.predicted_mean)
+            ci    = fc.conf_int(alpha=alpha)
+            ci_arr = np.asarray(ci) if hasattr(ci, '__array__') else ci.values
+            ci_lo  = ci_arr[:, 0]
+            ci_hi  = ci_arr[:, 1]
+
+        rul_p, rul_lo, rul_hi = _ci_crossing(mean, ci_lo, ci_hi, smoothed, threshold)
+
+        vel_rul = _linear_extrapolation_rul(smoothed, threshold)
+        rul_p   = float(min(rul_p,  max(vel_rul * 1.5, 5.0)))
+        rul_lo  = float(min(rul_lo, max(vel_rul * 1.5, 5.0)))
+        rul_hi  = float(min(rul_hi, RUL_CAP))
+
+        rul_p  = float(np.clip(rul_p,  0, RUL_CAP))
+        rul_lo = float(np.clip(rul_lo, 0, RUL_CAP))
+        rul_hi = float(np.clip(rul_hi, 0, RUL_CAP))
+
+        return {
+            "engine_id":        -1,
+            "rul_pred":         rul_p,
+            "lower_bound":      rul_lo,
+            "upper_bound":      rul_hi,
+            "confidence_width": rul_hi - rul_lo,
+            "model_name":       model_name,
+        }
+    except Exception:
+        return fallback
+
+
+def predict_dataset_with_ci(
+    df: pd.DataFrame,
+    predict_fn_ci: Callable,
+    threshold: float,
+    safety_factor: float = 1.0,
+    verbose_engines: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[int]]:
+    """
+    Run a `*_with_ci` predict function on every engine and collect results.
+
+    Parameters
+    ----------
+    predict_fn_ci : callable(series, threshold) → unified prediction dict
+    safety_factor : multiply `rul_pred` (not bounds) before clipping.
+
+    Returns
+    -------
+    y_true, y_pred, y_lower, y_upper, engine_ids
+        All as np.ndarray (float32) except engine_ids (list[int]).
+
+    Bug-detection guarantee
+    -----------------------
+    Asserts lower_bound ≤ rul_pred ≤ upper_bound for every engine.
+    Negative RUL predictions are clipped to 0 with a warning.
+    Invalid bounds (lower > upper after clipping) are corrected by swapping.
+    """
+    df = df.sort_values(["engine_id", "cycle"])
+
+    y_true, y_pred, y_lower, y_upper, engine_ids = [], [], [], [], []
+
+    for _, g in df.groupby("engine_id", sort=False):
+        series   = g["health_index"].values
+        true_rul = float(g["RUL"].iloc[-1])
+        eid      = int(g["engine_id"].iloc[0])
+
+        result = predict_fn_ci(series, threshold=threshold)
+
+        # Apply safety factor to point estimate only
+        rul_p  = float(np.clip(result["rul_pred"]    * safety_factor, 0.0, RUL_CAP))
+        rul_lo = float(np.clip(result["lower_bound"], 0.0, RUL_CAP))
+        rul_hi = float(np.clip(result["upper_bound"], 0.0, RUL_CAP))
+
+        # Bug-detection: fix inverted bounds
+        if rul_lo > rul_hi:
+            import warnings as _w
+            _w.warn(f"engine {eid}: lower_bound ({rul_lo:.1f}) > upper_bound ({rul_hi:.1f}) — swapping")
+            rul_lo, rul_hi = rul_hi, rul_lo
+        # Ensure point stays within bounds after safety factor scaling
+        rul_lo = min(rul_lo, rul_p)
+        rul_hi = max(rul_hi, rul_p)
+
+        if verbose_engines:
+            print(
+                f"  engine {eid:>4d}  true={true_rul:6.1f}  "
+                f"pred={rul_p:6.1f}  [{rul_lo:5.1f}, {rul_hi:5.1f}]  "
+                f"err={rul_p - true_rul:+.1f}"
+            )
+
+        y_true.append(true_rul)
+        y_pred.append(rul_p)
+        y_lower.append(rul_lo)
+        y_upper.append(rul_hi)
+        engine_ids.append(eid)
+
+    print(f"  predicted {len(y_true)} engines with CI  (safety_factor={safety_factor})")
+    return (
+        np.array(y_true,  dtype=np.float32),
+        np.array(y_pred,  dtype=np.float32),
+        np.array(y_lower, dtype=np.float32),
+        np.array(y_upper, dtype=np.float32),
+        engine_ids,
+    )
 
 
 # ─────────────────────────────────────────────

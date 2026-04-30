@@ -8,6 +8,8 @@ NASA score — asymmetric; late predictions penalised more heavily than early on
              d >= 0 (late):  exp(d/10)  - 1    → fast penalty
              total = sum over samples (lower is better, 0 is perfect)
 Bias       — mean signed error (pred - true); positive = predicting too late
+Coverage   — fraction of engines where y_true ∈ [lower_bound, upper_bound]
+             target ≥ 80% for a meaningful 80% prediction interval
 """
 
 from __future__ import annotations
@@ -42,6 +44,13 @@ _CSV_FIELDS = [
     "r2_score", "bias", "interval_width", "coverage_pct",
     "n_test_engines", "timestamp",
 ]
+
+_PRED_CSV_FIELDS = [
+    "engine_id", "model_name", "true_rul", "rul_pred",
+    "lower_bound", "upper_bound", "confidence_width", "in_interval",
+]
+
+PREDICTIONS_DIR = ROOT / "results" / "predictions"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CORE METRICS
@@ -123,6 +132,232 @@ def evaluate(
     return results
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 4: BUG DETECTION — BOUND VALIDATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def validate_prediction_bounds(
+    y_pred: np.ndarray,
+    y_lower: np.ndarray,
+    y_upper: np.ndarray,
+    model_name: str = "model",
+    rul_cap: float = 125.0,
+) -> dict[str, int]:
+    """
+    Validate per-engine prediction bounds for common bugs.
+
+    Checks
+    ------
+    1. Negative RUL predictions (y_pred < 0)
+    2. Predictions exceeding RUL_CAP
+    3. Inverted bounds (lower_bound > upper_bound)
+    4. Point prediction outside its own interval (y_pred < lower or y_pred > upper)
+    5. NaN or infinite values
+
+    Returns
+    -------
+    dict with counts of each violation type.  Prints a report.
+    All violations are flagged with the affected engine indices.
+    """
+    y_pred  = np.asarray(y_pred,  dtype=np.float64)
+    y_lower = np.asarray(y_lower, dtype=np.float64)
+    y_upper = np.asarray(y_upper, dtype=np.float64)
+
+    report: dict[str, int] = {}
+
+    # Check 1: negative predictions
+    neg_mask = y_pred < 0
+    report["negative_preds"] = int(neg_mask.sum())
+
+    # Check 2: over-cap predictions
+    overcap_mask = y_pred > rul_cap
+    report["over_cap_preds"] = int(overcap_mask.sum())
+
+    # Check 3: inverted bounds
+    inv_mask = y_lower > y_upper
+    report["inverted_bounds"] = int(inv_mask.sum())
+
+    # Check 4: point outside interval
+    outside_mask = (y_pred < y_lower - 1e-6) | (y_pred > y_upper + 1e-6)
+    report["pred_outside_interval"] = int(outside_mask.sum())
+
+    # Check 5: NaN / inf
+    nan_mask = ~(np.isfinite(y_pred) & np.isfinite(y_lower) & np.isfinite(y_upper))
+    report["nan_or_inf"] = int(nan_mask.sum())
+
+    # Print
+    n = len(y_pred)
+    print(f"\n  [{model_name}] Bound Validation Report ({n} engines):")
+    all_ok = True
+    for key, count in report.items():
+        status = "✓" if count == 0 else "✗"
+        print(f"    {status} {key}: {count}")
+        if count > 0:
+            all_ok = False
+    if all_ok:
+        print("    → All checks passed — predictions are numerically valid.")
+
+    return report
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 3: PER-ENGINE PREDICTIONS CSV
+# ══════════════════════════════════════════════════════════════════════════════
+
+def save_predictions_csv(
+    engine_ids: list[int],
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    y_lower: np.ndarray,
+    y_upper: np.ndarray,
+    model_name: str,
+    validate: bool = True,
+) -> Path:
+    """
+    Save per-engine RUL predictions with confidence intervals to CSV.
+
+    Runs validate_prediction_bounds() first when validate=True
+    (Phase 4 bug detection gate).
+
+    Output file: results/predictions/<model_name>.csv
+    Columns: engine_id, model_name, true_rul, rul_pred,
+             lower_bound, upper_bound, confidence_width, in_interval
+
+    Returns
+    -------
+    Path to the saved CSV.
+    """
+    y_true  = np.asarray(y_true,  dtype=np.float32).ravel()
+    y_pred  = np.asarray(y_pred,  dtype=np.float32).ravel()
+    y_lower = np.asarray(y_lower, dtype=np.float32).ravel()
+    y_upper = np.asarray(y_upper, dtype=np.float32).ravel()
+
+    if validate:
+        validate_prediction_bounds(y_pred, y_lower, y_upper, model_name=model_name)
+
+    in_interval = ((y_true >= y_lower) & (y_true <= y_upper)).astype(int)
+
+    PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
+    safe_name = model_name.replace("(", "").replace(")", "").replace(",", "_").replace(" ", "_")
+    out_path  = PREDICTIONS_DIR / f"{safe_name}.csv"
+
+    rows = []
+    for i, eid in enumerate(engine_ids):
+        rows.append({
+            "engine_id":        int(eid),
+            "model_name":       model_name,
+            "true_rul":         round(float(y_true[i]),  2),
+            "rul_pred":         round(float(y_pred[i]),  2),
+            "lower_bound":      round(float(y_lower[i]), 2),
+            "upper_bound":      round(float(y_upper[i]), 2),
+            "confidence_width": round(float(y_upper[i] - y_lower[i]), 2),
+            "in_interval":      int(in_interval[i]),
+        })
+
+    with open(out_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=_PRED_CSV_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    cov = float(in_interval.mean() * 100)
+    w   = float(np.mean(y_upper - y_lower))
+    print(f"  → Saved {len(rows)} predictions to {out_path.relative_to(ROOT)}")
+    print(f"     Coverage: {cov:.1f}%  |  Avg interval width: {w:.2f} cycles")
+    return out_path
+
+
+def load_predictions(model_name: str) -> pd.DataFrame:
+    """Load per-engine predictions CSV for a specific model."""
+    safe_name = model_name.replace("(", "").replace(")", "").replace(",", "_").replace(" ", "_")
+    path = PREDICTIONS_DIR / f"{safe_name}.csv"
+    if not path.exists():
+        raise FileNotFoundError(f"No predictions found for '{model_name}' at {path}")
+    return pd.read_csv(path)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 2: CONFORMAL PREDICTION CALIBRATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def conformal_calibrate(
+    y_cal_true: np.ndarray,
+    y_cal_pred: np.ndarray,
+    y_cal_lower: np.ndarray,
+    y_cal_upper: np.ndarray,
+    target_coverage: float = 0.80,
+) -> float:
+    """
+    Split conformal calibration to achieve guaranteed marginal coverage.
+
+    Given a calibration set (held-out engines not used in training),
+    compute the (1 − α)-th quantile of the non-conformity scores
+    (max distance of true value from the interval) and return the
+    additive margin `delta` to expand all intervals by.
+
+    Usage
+    -----
+    # 1. On calibration set:
+    delta = conformal_calibrate(y_cal_true, y_cal_pred, y_cal_lower, y_cal_upper)
+
+    # 2. At test time:
+    test_lower_cal = test_lower - delta
+    test_upper_cal = test_upper + delta
+    # Guaranteed marginal coverage ≥ target_coverage on exchangeable data.
+
+    Why split conformal over full conformal:
+        Full conformal requires re-fitting the model for each test point —
+        infeasible for SARIMAX and DL models.  Split conformal fits once
+        and calibrates on a separate set, giving the same coverage guarantee
+        at O(1) inference overhead (just add a constant delta).
+
+    Non-conformity score:
+        score_i = max(lower_i - true_i, true_i - upper_i, 0)
+        = 0 if true_i ∈ [lower_i, upper_i], else the gap.
+
+    Parameters
+    ----------
+    target_coverage : desired marginal coverage (default 0.80 = 80%)
+
+    Returns
+    -------
+    delta : float — additive margin to add to both bounds.
+            Apply as: cal_lower = lower - delta, cal_upper = upper + delta.
+    """
+    y_cal_true  = np.asarray(y_cal_true,  dtype=np.float64)
+    y_cal_lower = np.asarray(y_cal_lower, dtype=np.float64)
+    y_cal_upper = np.asarray(y_cal_upper, dtype=np.float64)
+
+    scores = np.maximum(
+        np.maximum(y_cal_lower - y_cal_true, y_cal_true - y_cal_upper),
+        0.0,
+    )
+
+    n     = len(scores)
+    level = np.ceil((n + 1) * target_coverage) / n
+    level = min(level, 1.0)
+    delta = float(np.quantile(scores, level))
+
+    print(f"  [Conformal] target={target_coverage*100:.0f}%  "
+          f"n_cal={n}  delta={delta:.3f} cycles")
+    return delta
+
+
+def apply_conformal_margin(
+    y_lower: np.ndarray,
+    y_upper: np.ndarray,
+    delta: float,
+    rul_cap: float = 125.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Apply the conformal calibration margin and re-clip to [0, RUL_CAP].
+
+    Returns (cal_lower, cal_upper) with guaranteed marginal coverage.
+    """
+    cal_lower = np.clip(np.asarray(y_lower) - delta, 0.0, rul_cap)
+    cal_upper = np.clip(np.asarray(y_upper) + delta, 0.0, rul_cap)
+    return cal_lower.astype(np.float32), cal_upper.astype(np.float32)
+
+
 def naive_baseline(
     y_true: np.ndarray,
     rul_cap: float = 125.0,
@@ -182,11 +417,13 @@ def summarise_all_models(results: dict[str, dict[str, float]]) -> pd.DataFrame:
 
 def save_model_results(
     model_name: str,
-    model_type: str,          # "classical" | "dl" | "quantile"
+    model_type: str,           # "classical" | "dl" | "quantile"
     y_true: np.ndarray,
     y_pred: np.ndarray,
     q10: np.ndarray | None = None,
     q90: np.ndarray | None = None,
+    y_lower: np.ndarray | None = None,   # alias: classical model lower bound
+    y_upper: np.ndarray | None = None,   # alias: classical model upper bound
     verbose: bool = True,
 ) -> dict:
     """
@@ -194,11 +431,13 @@ def save_model_results(
 
     Parameters
     ----------
-    model_name : str   e.g. "ARIMA(1,2,1)", "GRU", "Q-Transformer"
+    model_name : str   e.g. "ARIMA(1,2,2)", "GRU", "Q-Transformer"
     model_type : str   one of "classical", "dl", "quantile"
     y_true     : ground-truth RUL values
-    y_pred     : point predictions (Q50 for quantile models)
-    q10, q90   : optional lower/upper quantile bounds (quantile models only)
+    y_pred     : point predictions (Q50 for quantile models, point pred for others)
+    q10, q90   : lower/upper quantile bounds (quantile models — 10th/90th pct)
+    y_lower, y_upper : lower/upper CI bounds (classical and DL with MC Dropout)
+                       These are aliases for q10/q90 — whichever is provided is used.
 
     Returns
     -------
@@ -206,11 +445,15 @@ def save_model_results(
     """
     results = evaluate(y_true, y_pred, model_name=model_name, verbose=verbose)
 
-    # Interval metrics (quantile models only)
-    interval_width = float(np.mean(q90 - q10)) if (q10 is not None and q90 is not None) else float("nan")
+    # Unify bound sources: y_lower/y_upper take precedence over q10/q90 when both given
+    lo = y_lower if y_lower is not None else q10
+    hi = y_upper if y_upper is not None else q90
+
+    # Interval metrics — available for all model types that provide bounds
+    interval_width = float(np.mean(hi - lo)) if (lo is not None and hi is not None) else float("nan")
     coverage_pct   = (
-        float(np.mean((y_true >= q10) & (y_true <= q90)) * 100)
-        if (q10 is not None and q90 is not None) else float("nan")
+        float(np.mean((np.asarray(y_true) >= lo) & (np.asarray(y_true) <= hi)) * 100)
+        if (lo is not None and hi is not None) else float("nan")
     )
 
     row = {
