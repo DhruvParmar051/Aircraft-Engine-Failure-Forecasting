@@ -10,7 +10,7 @@ Point-prediction models (output scalar RUL):
 Quantile models (output 3-vector [Q10, Q50, Q90]):
     QuantileGRU, QuantileLSTM, QuantileRNN, QuantileMLP, QuantileTransformer
 
-Stable variant:
+Utility block:
     StableLSTMBlock  — LSTM + LayerNorm + residual (fixes Q_LSTM instability)
 
 Usage
@@ -28,6 +28,54 @@ import torch.nn as nn
 from src.utils.config import DL_CONFIG
 
 WINDOW_SIZE = DL_CONFIG["window_size"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STABLE LSTM BLOCK (shared utility)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class StableLSTMBlock(nn.Module):
+    """
+    LSTM + LayerNorm + residual projection.
+
+    Why Q_LSTM failed (RMSE=40, bias=-27, coverage=21%):
+        Pinball loss has steeper gradients for under-predictions (early RUL).
+        Without layer normalization, hidden states can scale inconsistently
+        across the 6 operating conditions of FD004 → the LSTM saturates
+        into a low-RUL attractor → systematic under-prediction → narrow,
+        over-confident low intervals → 21% coverage.
+
+    Fix: LayerNorm after each LSTM output normalises hidden states across
+    the feature dimension, preventing the low-RUL attractor.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        num_layers: int = 1,
+        dropout: float = 0.2,
+    ):
+        super().__init__()
+        self.lstm = nn.LSTM(
+            input_size, hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0.0,
+        )
+        self.norm = nn.LayerNorm(hidden_size)
+        self.proj = (
+            nn.Linear(input_size, hidden_size, bias=False)
+            if input_size != hidden_size else nn.Identity()
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out, _  = self.lstm(x)
+        out     = self.norm(out)
+        last    = out[:, -1, :]
+        res     = self.proj(x[:, -1, :])
+        return last + res
 
 
 # ══════════════════════════════════════════════════════════════════════════════

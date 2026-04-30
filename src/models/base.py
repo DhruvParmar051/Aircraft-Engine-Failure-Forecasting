@@ -55,6 +55,7 @@ class PredictionResult:
     upper_bound:      float
     confidence_width: float
     model_name:       str
+    rul_true:         float | None = None   # set when ground truth is known (e.g. test set)
 
     def __post_init__(self):
         if self.lower_bound > self.upper_bound + 1e-6:
@@ -64,7 +65,7 @@ class PredictionResult:
             )
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "engine_id":        self.engine_id,
             "rul_pred":         self.rul_pred,
             "lower_bound":      self.lower_bound,
@@ -72,6 +73,9 @@ class PredictionResult:
             "confidence_width": self.confidence_width,
             "model_name":       self.model_name,
         }
+        if self.rul_true is not None:
+            d["rul_true"] = self.rul_true
+        return d
 
 
 # ══════════════════════════════════════════════════════════════════════════════

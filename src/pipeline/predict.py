@@ -326,7 +326,12 @@ def apply_conformal(
     """
     from src.models.uncertainty import conformal_calibrate, apply_conformal_margin
 
-    y_cal_true  = np.array([r.rul_pred for r in cal_results])
+    if any(r.rul_true is None for r in cal_results):
+        raise ValueError(
+            "apply_conformal: all calibration PredictionResult objects must have rul_true set. "
+            "Pass results from a held-out set where ground truth is known."
+        )
+    y_cal_true  = np.array([r.rul_true  for r in cal_results])
     y_cal_lower = np.array([r.lower_bound for r in cal_results])
     y_cal_upper = np.array([r.upper_bound for r in cal_results])
 

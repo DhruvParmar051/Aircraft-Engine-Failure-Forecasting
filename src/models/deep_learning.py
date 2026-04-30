@@ -32,6 +32,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
+from src.models.dl_architectures import StableLSTMBlock  # canonical definition
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # NASA ASYMMETRIC LOSS
@@ -572,61 +574,7 @@ def predict_with_mc_dropout(
     return q_low, q_mid, q_high, std_pred
 
 
-# ── Stable LSTM block (fixes Q_LSTM instability) ──────────────────────────────
-
-class StableLSTMBlock(nn.Module):
-    """
-    LSTM + LayerNorm + residual projection.
-
-    Why Q_LSTM failed (RMSE=40, bias=-27, coverage=21%):
-        Pinball loss has steeper gradients for under-predictions (early RUL).
-        Without layer normalization, hidden states can scale inconsistently
-        across the 6 operating conditions of FD004 → the LSTM saturates
-        into a low-RUL attractor → systematic under-prediction → narrow,
-        over-confident low intervals → 21% coverage.
-
-    Fix: LayerNorm after each LSTM output normalises hidden states across
-    the feature dimension, preventing the low-RUL attractor.  A linear
-    projection allows the block to be stacked with residual connections
-    (input_size == hidden_size when used as a drop-in replacement).
-
-    Usage in Q_LSTM notebook:
-        Replace `nn.LSTM(input_size, hidden_size, ...)` with
-        `StableLSTMBlock(input_size, hidden_size)`.
-    """
-
-    def __init__(
-        self,
-        input_size: int,
-        hidden_size: int,
-        num_layers: int = 1,
-        dropout: float = 0.2,
-    ):
-        super().__init__()
-        self.lstm    = nn.LSTM(
-            input_size, hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0.0,
-        )
-        self.norm    = nn.LayerNorm(hidden_size)
-        # Projection for residual when input_size ≠ hidden_size
-        self.proj    = (
-            nn.Linear(input_size, hidden_size, bias=False)
-            if input_size != hidden_size else nn.Identity()
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x : (batch, seq_len, input_size)
-        Returns last-step output : (batch, hidden_size)
-        """
-        out, _ = self.lstm(x)       # (B, T, hidden_size)
-        out    = self.norm(out)      # stabilise hidden states
-        # Residual connection on last timestep only
-        last   = out[:, -1, :]                      # (B, hidden_size)
-        res    = self.proj(x[:, -1, :])              # (B, hidden_size)
-        return last + res
+# StableLSTMBlock is defined in src/models/dl_architectures and imported above.
 
 
 # ══════════════════════════════════════════════════════════════════════════════
