@@ -24,7 +24,6 @@ Usage
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
@@ -64,6 +63,7 @@ def predict_dl(
     Quantile models: lower_bound = Q10, rul_pred = Q50, upper_bound = Q90.
     """
     import torch
+    import torch.utils.data as tud
     from src.models.deep_learning import (
         load_data, select_features, build_windows,
         make_loaders, predict_test, predict_quantiles,
@@ -75,15 +75,11 @@ def predict_dl(
 
     # ── Load data ──────────────────────────────────────────────────────────────
     _, test_df = load_data()
-    feat_cols = select_features(test_df) if not model_kwargs.get("feat_cols") else model_kwargs.pop("feat_cols")
+    feat_cols = select_features(test_df)
     _n_feat   = n_features or len(feat_cols)
 
     # ── Build test windows ─────────────────────────────────────────────────────
-    from src.models.deep_learning import engine_split
-    # We only need test windows; build_windows with is_test=True gives last window per engine
     X_test, y_test = build_windows(test_df, feat_cols, is_test=True)
-    from src.models.deep_learning import make_loaders
-    import torch.utils.data as tud
     X_tensor  = torch.tensor(X_test,  dtype=torch.float32)
     y_tensor  = torch.tensor(y_test,  dtype=torch.float32)
     test_loader = tud.DataLoader(
