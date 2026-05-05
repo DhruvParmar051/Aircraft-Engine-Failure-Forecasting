@@ -2001,7 +2001,7 @@ def isotonic_ablation(
     test: pd.DataFrame,
     sensor_cols: list[str],
     rolling_window: int = 10,
-    n_components: int = 2,
+    n_components: int = 1,
     n_engine_plots: int = 5,
 ) -> dict:
     """

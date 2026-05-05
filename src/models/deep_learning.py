@@ -474,10 +474,6 @@ def plot_predictions(
     plt.show()
 
 
-# MCDropout and predict_with_mc_dropout live in src/models/uncertainty.py.
-# Use: from src.models.uncertainty import MCDropout
-
-
 # StableLSTMBlock is defined in src/models/dl_architectures and imported above.
 
 

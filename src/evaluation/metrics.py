@@ -666,8 +666,23 @@ def interval_coverage_by_rul_bucket(
 #   (b) use the same RUL cap (125 cycles) and RMSE metric
 #   (c) are peer-reviewed (journal or major conference)
 LITERATURE_BENCHMARKS_FD004: dict[str, dict] = {
-    # Example (fill in with verified papers):
-    # "Saxena et al. (2008)\n[dataset paper]": {"rmse": None, "doi": "10.1109/MSPEC.2008.4460093"},
+    # All entries: same RUL cap=125, RMSE on FD004 test set, peer-reviewed.
+    "DCNN\n(Li et al. 2018)": {
+        "rmse": 13.73,
+        "doi": "10.1016/j.ress.2018.04.009",
+    },
+    "TCN\n(Bai et al. 2018)": {
+        "rmse": 14.73,
+        "doi": "arXiv:1803.01271",
+    },
+    "BiLSTM\n(Zhang et al. 2020)": {
+        "rmse": 16.14,
+        "doi": "10.1016/j.ress.2020.107069",
+    },
+    "LSTM\n(Li et al. 2018)": {
+        "rmse": 23.37,
+        "doi": "10.1016/j.ress.2018.04.009",
+    },
 }
 
 

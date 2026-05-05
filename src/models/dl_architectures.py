@@ -116,7 +116,12 @@ class LSTMModel(nn.Module):
     """
     LSTM for RUL point regression.
 
-    Architecture: LSTM (2 layers, hidden=64) → last hidden state → Linear(1)
+    Architecture: LSTM (2 layers, hidden=64) → LayerNorm → last hidden state → Linear(1)
+
+    LayerNorm added after LSTM output: without it, hidden states scale inconsistently
+    across FD004's 6 operating conditions under NASA asymmetric loss, causing the model
+    to saturate into a low-RUL attractor (bias ≈ −21, RMSE ≈ 32). LayerNorm prevents
+    this by normalising hidden states across the feature dimension at each step.
     """
 
     def __init__(
@@ -134,11 +139,12 @@ class LSTMModel(nn.Module):
             batch_first=True,
             dropout=dropout if n_layers > 1 else 0.0,
         )
+        self.norm = nn.LayerNorm(hidden_size)
         self.fc = nn.Linear(hidden_size, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out, _ = self.lstm(x)
-        return self.fc(out[:, -1, :]).squeeze(-1)
+        return self.fc(self.norm(out[:, -1, :])).squeeze(-1)
 
 
 class RNNModel(nn.Module):
@@ -163,10 +169,12 @@ class RNNModel(nn.Module):
             batch_first=True,
             dropout=dropout if n_layers > 1 else 0.0,
         )
+        self.norm = nn.LayerNorm(hidden_size)
         self.fc = nn.Linear(hidden_size, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out, _ = self.rnn(x)
+        out = self.norm(out)
         return self.fc(out[:, -1, :]).squeeze(-1)
 
 
@@ -307,7 +315,15 @@ class QuantileLSTM(nn.Module):
 
 
 class QuantileRNN(nn.Module):
-    """RNN with 3-output quantile head."""
+    """
+    RNN with 3-output quantile head + LayerNorm.
+
+    LayerNorm added after RNN output: without it, Q10 collapses to 0 for all
+    248 test engines under pinball loss on FD004's 6 operating conditions.
+    The RNN hidden state scales inconsistently across conditions, causing the
+    Q10 head to learn the trivial lower-bound solution (predict 0 always).
+    LayerNorm normalises hidden states per-step, preventing this collapse.
+    """
 
     def __init__(
         self,
@@ -323,11 +339,12 @@ class QuantileRNN(nn.Module):
             batch_first=True,
             dropout=dropout if n_layers > 1 else 0.0,
         )
+        self.norm = nn.LayerNorm(hidden_size)
         self.fc = nn.Linear(hidden_size, n_quantiles)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out, _ = self.rnn(x)
-        return self.fc(out[:, -1, :])
+        return self.fc(self.norm(out[:, -1, :]))
 
 
 class QuantileMLP(nn.Module):
