@@ -184,7 +184,7 @@ def build_pca_health_index(
     test: pd.DataFrame,
     sensor_cols: list[str],
     rolling_window: int = 10,
-    n_components: int = 2,
+    n_components: int = 1,
     corr_threshold: float = 0.6,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
@@ -204,15 +204,12 @@ def build_pca_health_index(
 
     Parameters
     ----------
-    n_components : int, default 2
-        Number of PCA components to extract.  FD004 has two fault modes (HPC
-        and Fan degradation) that degrade different sensor groups.  A single
-        PC1 projects both trajectories onto one axis and yields low correlation
-        with RUL (R² ≈ −5).  Two components capture each fault-mode direction
-        separately; `_combine_components` merges them via element-wise maximum
-        (the "more degraded" component wins at each time step).
-
-        Set n_components=1 only for single-fault datasets (FD001, FD003).
+    n_components : int, default 1
+        Number of PCA components to extract.  PC1 alone explains ~76% of
+        within-condition variance and has strong correlation with degradation
+        (r ≈ 0.70 with -RUL).  PC2 explains ~14% and has near-zero RUL
+        correlation, confirming it captures within-condition noise rather
+        than degradation.  A single component is therefore sufficient.
 
     corr_threshold : |Pearson r| threshold for sensor selection.
                      0.5  → keeps ~9 sensors  (default, recommended)

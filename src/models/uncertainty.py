@@ -1,24 +1,17 @@
 """
 uncertainty.py — centralized uncertainty estimation for all model types.
 
-Consolidates functionality previously scattered across classical.py and
-deep_learning.py into a single module that any model can import.
-
 Functions
 ---------
 Classical models (SARIMAX conf_int):
     sarimax_ci_to_rul_bounds  — convert SARIMAX forecast CI to RUL (lo, point, hi)
-
-DL point models (MC Dropout):
-    MCDropout                 — wrapper keeping dropout active at eval()
-    mc_dropout_predict        — run N stochastic forward passes → (Q10, Q50, Q90)
 
 Calibration (conformal):
     conformal_calibrate       — compute additive margin delta from calibration set
     apply_conformal_margin    — expand intervals by delta, re-clip to [0, RUL_CAP]
 
 All functions operate on numpy arrays and are framework-agnostic at the
-calling level — they import torch only when needed.
+calling level.
 """
 
 from __future__ import annotations
@@ -26,7 +19,7 @@ from __future__ import annotations
 import warnings
 import numpy as np
 
-from src.utils.config import RUL_CAP, DL_CONFIG, EVAL_CONFIG
+from src.utils.config import RUL_CAP, EVAL_CONFIG
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -128,100 +121,6 @@ def _linear_extrapolation(
     if slope <= 1e-4:
         return float(RUL_CAP)
     return float(np.clip((threshold - last) / slope, 0.0, RUL_CAP))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# DL: MONTE CARLO DROPOUT
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-class MCDropout:
-    """
-    Monte Carlo Dropout wrapper for any PyTorch point-prediction model.
-
-    Keeps dropout active at eval() time, turning each forward pass into
-    a sample from the approximate posterior (Gal & Ghahramani, 2016).
-
-    Usage
-    -----
-        mc = MCDropout(model, p_drop=0.1)
-        mc.enable()            # activate dropout at eval time
-        q10, q50, q90, std = mc.predict(X_test)
-    """
-
-    def __init__(self, model, p_drop: float = 0.1):
-        import torch.nn as nn
-        self._model  = model
-        self._p_drop = p_drop
-        self._extra_dropout = nn.Dropout(p=p_drop)
-
-    def enable(self):
-        """Force all Dropout layers in the base model to stay active."""
-        import torch.nn as nn
-        def _activate(m):
-            if isinstance(m, nn.Dropout):
-                m.train()
-        self._model.apply(_activate)
-
-    def predict(
-        self,
-        X_test: np.ndarray,
-        n_samples: int = DL_CONFIG["mc_dropout_samples"],
-        quantiles: list[float] = None,
-        batch_size: int = DL_CONFIG["batch_size"],
-        device=None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Run MC Dropout inference and return empirical quantile bands.
-
-        Parameters
-        ----------
-        X_test    : (n_engines, window_size, n_features) float32
-        n_samples : stochastic forward passes (default 30)
-        quantiles : (q_low, q_mid, q_high), default (0.10, 0.50, 0.90)
-
-        Returns
-        -------
-        q_low, q_mid, q_high, std_pred : (n_engines,) each
-        """
-        import torch
-
-        if quantiles is None:
-            quantiles = DL_CONFIG["quantiles"]
-
-        if device is None:
-            device = next(self._model.parameters()).device
-
-        self._model.eval()
-        self.enable()
-
-        X_tensor = torch.tensor(X_test, dtype=torch.float32)
-        dataset  = torch.utils.data.TensorDataset(X_tensor)
-        loader   = torch.utils.data.DataLoader(
-            dataset, batch_size=batch_size, shuffle=False
-        )
-
-        samples = []
-        with torch.no_grad():
-            for _ in range(n_samples):
-                batch_preds = []
-                for (X_b,) in loader:
-                    out = self._extra_dropout(self._model(X_b.to(device)))
-                    out = torch.clamp(out, 0, RUL_CAP)
-                    batch_preds.append(out.cpu().numpy().ravel())
-                samples.append(np.concatenate(batch_preds))
-
-        arr      = np.stack(samples, axis=0)         # (n_samples, n_engines)
-        q_vals   = np.quantile(arr, quantiles, axis=0)
-        std_pred = arr.std(axis=0)
-
-        q_low, q_mid, q_high = q_vals[0], q_vals[1], q_vals[2]
-
-        # Bug-detection: ordering guarantee
-        assert np.all(q_low  <= q_mid  + 1e-4), "MC Dropout: q_low > q_mid"
-        assert np.all(q_mid  <= q_high + 1e-4), "MC Dropout: q_mid > q_high"
-
-        return q_low, q_mid, q_high, std_pred
 
 
 # ══════════════════════════════════════════════════════════════════════════════

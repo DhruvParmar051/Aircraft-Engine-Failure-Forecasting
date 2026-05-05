@@ -75,7 +75,7 @@ SAFETY_FACTOR:   float = 0.88    # conservative multiplier for classical model p
 CLASSICAL_CONFIG = {
     "smooth_window":   10,    # rolling-median window before SARIMAX fit
     "rolling_window":  10,    # rolling-mean window for PCA features
-    "n_pca_components": 2,    # FD004 has 2 fault modes → 2 PCA components
+    "n_pca_components": 1,    # PC1 alone captures the degradation signal (76% variance, r≈0.70 with -RUL)
     "corr_threshold":  0.5,   # |Pearson r| threshold for sensor selection
     "recent_window_frac": 0.30,  # adaptive recency window fraction
     "recent_window_min":  20,
@@ -107,7 +107,6 @@ DL_CONFIG = {
     "d_model":       64,      # Transformer model dimension
     "n_heads":       4,
     "dim_feedforward_mult": 4,  # dim_ff = d_model × this
-    "mc_dropout_samples": 30,   # MC Dropout forward passes
     "quantiles":     [0.10, 0.50, 0.90],
 }
 

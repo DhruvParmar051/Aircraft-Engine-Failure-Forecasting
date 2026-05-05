@@ -6,7 +6,7 @@ produces PredictionResult objects for every test engine.
 
 Usage
 -----
-    from src.pipeline.predict import predict_dl, predict_classical, predict_mc_dropout
+    from src.pipeline.predict import predict_dl, predict_classical
 
     # Point DL model (saved weights)
     results = predict_dl("GRU")
@@ -16,9 +16,6 @@ Usage
 
     # Classical with CI
     results = predict_classical("ARIMA", p=1, d=2, q=2)
-
-    # MC Dropout uncertainty on a point model
-    results = predict_mc_dropout("GRU")
 """
 
 from __future__ import annotations
@@ -31,6 +28,7 @@ from src.utils.config import (
     PROC_DIR, ARTIFACTS_DIR, DL_CONFIG, CLASSICAL_CONFIG,
     DL_SENSOR_COLS, SENSOR_COLS, RUL_CAP,
 )
+
 from src.models.base import PredictionResult
 
 
@@ -128,85 +126,6 @@ def predict_dl(
             )
             for i in engine_ids
         ]
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MC DROPOUT INFERENCE PIPELINE
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-def predict_mc_dropout(
-    model_name: str,
-    n_features: int | None = None,
-    weights_path: Path | None = None,
-    n_samples: int = DL_CONFIG["mc_dropout_samples"],
-    p_drop: float = 0.1,
-    verbose: bool = True,
-    **model_kwargs,
-) -> list[PredictionResult]:
-    """
-    Load a saved point-prediction DL model and wrap it with MC Dropout
-    to produce Q10/Q50/Q90 uncertainty estimates.
-
-    Parameters
-    ----------
-    model_name : key in POINT_MODELS, e.g. "GRU", "LSTM"
-    n_samples  : stochastic forward passes (default 30)
-    p_drop     : additional dropout probability applied to each forward pass
-
-    Returns
-    -------
-    list of PredictionResult with Q10 lower_bound, Q50 rul_pred, Q90 upper_bound.
-    """
-    import torch
-    from src.models.deep_learning import load_data, select_features, build_windows, DEVICE, BATCH_SIZE
-    from src.models.dl_architectures import build_model, QUANTILE_MODELS
-    from src.models.uncertainty import MCDropout
-
-    if model_name in QUANTILE_MODELS:
-        raise ValueError(
-            f"'{model_name}' is already a quantile model. Use predict_dl() instead."
-        )
-
-    # ── Load data & build test windows ─────────────────────────────────────────
-    _, test_df = load_data()
-    feat_cols  = select_features(test_df)
-    _n_feat    = n_features or len(feat_cols)
-    X_test, y_test = build_windows(test_df, feat_cols, is_test=True)
-
-    # ── Load model ─────────────────────────────────────────────────────────────
-    model = build_model(model_name, n_features=_n_feat, **model_kwargs).to(DEVICE)
-    path  = weights_path or (ARTIFACTS_DIR / f"{model_name}.pt")
-    if not path.exists():
-        raise FileNotFoundError(
-            f"No saved weights at {path}. Run run_dl_training('{model_name}', save=True) first."
-        )
-    model.load_state_dict(torch.load(path, map_location=DEVICE))
-
-    # ── MC Dropout predict ─────────────────────────────────────────────────────
-    mc = MCDropout(model, p_drop=p_drop)
-    q_low, q_mid, q_high, std = mc.predict(
-        X_test, n_samples=n_samples, device=DEVICE
-    )
-
-    if verbose:
-        print(
-            f"[MC-{model_name}] n_samples={n_samples}  "
-            f"mean_width={float(np.mean(q_high - q_low)):.1f}  "
-            f"mean_std={float(np.mean(std)):.2f}"
-        )
-
-    return [
-        PredictionResult(
-            engine_id=i,
-            rul_pred=float(q_mid[i]),
-            lower_bound=float(q_low[i]),
-            upper_bound=float(q_high[i]),
-            confidence_width=float(q_high[i] - q_low[i]),
-            model_name=f"MC_{model_name}",
-        )
-        for i in range(len(y_test))
-    ]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
