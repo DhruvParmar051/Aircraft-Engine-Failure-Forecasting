@@ -687,51 +687,90 @@ LITERATURE_BENCHMARKS_FD004: dict[str, dict] = {
 
 
 def compare_to_benchmarks(
-    our_results: dict[str, float],
-    metric: str = "rmse",
+    our_results: dict,
 ) -> pd.DataFrame:
     """
-    Combine our model results with published FD004 benchmarks into a single table
-    and plot a bar chart with our models highlighted.
+    Combine our model results into a single table
+    and plot RMSE + NASA Score comparison.
 
     Parameters
     ----------
-    our_results : {model_name: rmse_value}  — our trained models
-    metric      : "rmse" (only rmse supported from literature)
+    our_results : {
+        model_name: {
+            'rmse': value,
+            'nasa_score': value
+        }
+    }
     """
+
     rows = []
-    for name, val in our_results.items():
-        rows.append({"model": name, metric: val, "source": "This work"})
-    for name, info in LITERATURE_BENCHMARKS_FD004.items():
-        rows.append({"model": name, metric: info[metric], "source": "Literature"})
 
-    df = pd.DataFrame(rows).sort_values(metric).reset_index(drop=True)
-    df.index += 1; df.index.name = "rank"
+    for name, metrics in our_results.items():
+        rows.append({
+            "model": name,
+            "rmse": metrics["rmse"],
+            "nasa_score": metrics["nasa_score"],
+            "source": "This work"
+        })
 
-    print(f"\n=== FD004 {metric.upper()} Comparison vs Literature ===")
-    print(df[["model", metric, "source"]].to_string())
+    df = pd.DataFrame(rows)
 
-    # Bar chart
-    colours = ["#2196F3" if s == "This work" else "#BDBDBD" for s in df["source"]]
-    fig, ax = plt.subplots(figsize=(max(8, len(df) * 0.9), 5))
-    bars = ax.bar(df["model"], df[metric], color=colours, edgecolor="white")
-    for bar, val in zip(bars, df[metric]):
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1,
-                f"{val:.2f}", ha="center", va="bottom", fontsize=8)
-    ax.set_ylabel(f"{metric.upper()} (cycles, lower is better)")
-    ax.set_title(f"FD004 {metric.upper()} — This Work vs Published Literature")
-    ax.tick_params(axis="x", rotation=30)
+    # Sort by RMSE
+    df = df.sort_values("rmse").reset_index(drop=True)
 
-    legend_patches = [
-        mpatches.Patch(color="#2196F3", label="This work"),
-        mpatches.Patch(color="#BDBDBD", label="Literature"),
-    ]
-    ax.legend(handles=legend_patches)
+    df.index += 1
+    df.index.name = "rank"
+
+    print("\n=== FD004 Comparison vs Literature ===")
+    print(df[["model", "rmse", "nasa_score", "source"]].to_string())
+
+    models = df["model"]
+    rmse = df["rmse"]
+    nasa_score = df["nasa_score"]
+
+    x = np.arange(len(models))
+
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+
+    # ---------------- RMSE Bars ----------------
+    bars = ax1.bar(
+        x,
+        rmse,
+        width=0.55,
+        color='steelblue',
+        label='RMSE'
+    )
+
+    ax1.set_ylabel('RMSE (cycles)', fontsize=14)
+    ax1.set_ylim(min(rmse) - 1, max(rmse) + 1)
+
+    # Value labels for RMSE
+    for bar in bars:
+        h = bar.get_height()
+        ax1.text(
+            bar.get_x() + bar.get_width()/2,
+            h + 0.03,
+            f'{h:.1f}',
+            ha='center',
+            fontsize=9
+        )
+
+   
+    # ---------------- X-axis ----------------
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(models, rotation=20, fontsize=12)
+
+    # Combined legend
+    handles1, labels1 = ax1.get_legend_handles_labels()
+  
+    
+
+    plt.title('FD004 Model Comparison', fontsize=18)
+
+    ax1.grid(axis='y', alpha=0.3)
+
     plt.tight_layout()
     plt.show()
-
-    return df
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY TABLE
